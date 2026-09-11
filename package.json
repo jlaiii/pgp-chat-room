@@ -1,0 +1,34 @@
+{
+  "name": "pgp-chat-room",
+  "version": "1.0.0",
+  "description": "End-to-end encrypted PGP group chat: the server stores ciphertext it cannot read.",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "openpgp": "^6.3.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jlaiii/pgp-chat-room.git"
+  },
+  "keywords": [
+    "pgp",
+    "openpgp",
+    "end-to-end-encryption",
+    "encrypted-chat",
+    "self-hosted",
+    "websocket",
+    "privacy"
+  ]
+}

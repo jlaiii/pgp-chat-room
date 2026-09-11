@@ -1,0 +1,14 @@
+# Caddy: automatic HTTPS + WebSocket pass-through. Replace the hostname.
+#
+# No domain? A name like chat.203-0-113-10.sslip.io resolves straight to that IP
+# and can hold a real certificate — DNS only, no proxy in the traffic path.
+
+chat.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8788
+}
+
+# Optional: keep a short link that bounces to the HTTPS room.
+# :80 {
+# 	redir /chat https://chat.example.com/ 308
+# }

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>PGP Room</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236c8cff' d='M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css?v=5">
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-l">
+    <span class="dot off" id="connDot" aria-hidden="true"></span>
+    <svg class="lock" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
+    <h1>PGP Room</h1>
+    <span class="tag">end-to-end</span>
+  </div>
+  <div class="hdr-r">
+    <span class="online" id="onlineCount">–</span>
+    <button class="me" id="meBtn" type="button">
+      <span class="swatch" id="mySwatch"></span>
+      <span id="myHandle">…</span>
+    </button>
+  </div>
+</header>
+
+<div class="banner" id="banner">
+  <div class="spin" id="bannerSpin" aria-hidden="true"></div>
+  <div class="banner-txt" id="bannerText">Setting up your key…</div>
+  <button class="x" id="bannerClose" type="button" aria-label="Dismiss" hidden>
+    <svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg>
+  </button>
+</div>
+
+<main class="log" id="log">
+  <div class="lockdivider" id="lockDivider" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
+    <span id="lockText"></span>
+  </div>
+  <div class="retention" id="retentionNote" hidden></div>
+  <div id="msgs" class="msgs"></div>
+</main>
+<footer class="composer">
+  <textarea id="input" rows="1" autocomplete="off" autocapitalize="sentences" enterkeyhint="send"
+            placeholder="Message — encrypted on this device"></textarea>
+  <button class="send" id="sendBtn" type="button" aria-label="Send" disabled>
+    <svg viewBox="0 0 24 24"><path d="M3 20.5 21 12 3 3.5v6.6l11 1.9-11 1.9z"/></svg>
+  </button>
+</footer>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<section class="sheet" id="sheet" hidden aria-label="My key">
+  <div class="grip" aria-hidden="true"></div>
+  <h2>Your key</h2>
+  <div class="kv">
+    <div class="k">Handle</div>
+    <div class="v"><input id="handleInput" maxlength="24" spellcheck="false"> <button class="btn sm" id="saveHandle" type="button">Save</button></div>
+  </div>
+  <div class="kv">
+    <div class="k">Fingerprint</div>
+    <div class="v mono" id="fpFull">—</div>
+  </div>
+  <div class="kv">
+    <div class="k">Key created</div>
+    <div class="v" id="createdAt">—</div>
+  </div>
+  <div class="kv">
+    <div class="k">Algorithm</div>
+    <div class="v" id="algoTxt">—</div>
+  </div>
+  <div class="actions">
+    <button class="btn" id="copyFp" type="button">Copy fingerprint</button>
+    <button class="btn" id="backupKey" type="button">Download key backup</button>
+    <label class="btn file" for="restoreKey">Restore from backup</label>
+    <input type="file" id="restoreKey" accept=".asc,.txt,.key" hidden>
+  </div>
+  <p class="note">Your private key is generated in this browser and never sent to the server. The server stores ciphertext it cannot read. Messages are deleted automatically once they age out of the retention window. Lose this device <em>and</em> the backup file, and your messages are gone for good.</p>
+</section>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/vendor/openpgp.min.js?v=1"></script>
+<script src="/app.js?v=5"></script>
+</body>
+</html>

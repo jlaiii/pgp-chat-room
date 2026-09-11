@@ -1,0 +1,36 @@
+[Unit]
+Description=PGP Room — end-to-end encrypted chat relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pgpchat
+Group=pgpchat
+WorkingDirectory=/opt/pgpchat
+ExecStart=/usr/bin/node /opt/pgpchat/server.js
+Environment=NODE_ENV=production
+Restart=on-failure
+RestartSec=3
+
+# hardening: the relay only needs to read its code and write ./data
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+ReadWritePaths=/opt/pgpchat/data
+
+[Install]
+WantedBy=multi-user.target

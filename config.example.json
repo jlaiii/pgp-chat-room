@@ -1,0 +1,20 @@
+{
+  "port": 8788,
+  "bind": "127.0.0.1",
+  "publicDir": "public",
+  "dataDir": "data",
+  "trustProxy": true,
+  "retentionHours": 48,
+  "cleanupMinutes": 1,
+  "maxPool": 500,
+  "maxMsgBytes": 131072,
+  "maxRecipients": 300,
+  "maxKeyBytes": 8192,
+  "historyLimit": 400,
+  "rate": {
+    "msgsPerMin": 25,
+    "keysPerMin": 8,
+    "connsPerMin": 40
+  },
+  "publicUrl": "https://chat.example.com/"
+}
