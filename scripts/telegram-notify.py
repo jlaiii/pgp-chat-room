@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""PGP Room — optional join/leave notifier for the Telegram Bot API.
+"""PGP Room — optional notifier for the Telegram Bot API.
 
-Reads new lines from the relay's events log (handles + join/leave timestamps only —
-never message content, since the relay cannot decrypt) and sends one message per
-batch. Intended to run from a systemd timer every ~30s; silent on quiet runs.
+Reads new lines from the relay's events log (handles, joins, moderation actions and the
+one-time admin bootstrap code — never message content, since the relay cannot decrypt) and
+sends at most two messages per run: the bootstrap code on its own, then one summary of
+everything else. Intended to run from a systemd timer every ~30s; silent on quiet runs.
 
 Configuration (environment):
   PGPCHAT_TG_CHATS       comma-separated chat ids to notify           (required)
@@ -28,7 +29,9 @@ DATA_DIR = os.environ.get("PGPCHAT_DATA_DIR", "data")
 EVENT_FILE = os.path.join(DATA_DIR, "events.log")
 OFFSET_FILE = os.environ.get("PGPCHAT_TG_OFFSET", os.path.join(DATA_DIR, ".notify-offset"))
 ROOM_URL = os.environ.get("PGPCHAT_ROOM_URL", "")
-NOTIFY_TYPES = {"join", "leave", "evict"}
+NOTIFY_TYPES = {"join", "leave", "evict", "ban", "unban", "room-create", "room-delete",
+                "member-op", "role", "settings", "admin-claimed", "login-failed"}
+PRESENCE_TYPES = {"join", "leave", "evict"}
 MAX_EVENT_BYTES = 5 * 1024 * 1024
 
 
@@ -65,30 +68,74 @@ def stamp(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).strftime("%-I:%M %p")
 
 
-def build_text(events: list[dict]) -> str | None:
-    seen: dict[str, list[dict]] = {}
+def claim_text(code: str) -> str:
+    return ("PGP Room — your admin seat is unclaimed.\n\n"
+            f"One-time code: {code}\n\n"
+            "Create your account in the app, then use Moderation & admin -> Claim admin and enter "
+            "this code. It works once and is stored nowhere afterwards."
+            + (f"\n{ROOM_URL}" if ROOM_URL else ""))
+
+
+def build_text(events: list[dict]) -> tuple[str | None, str | None]:
+    """Return (bootstrap_code, summary_text). The code is sent on its own message."""
+    code: str | None = None
+    seen: dict[tuple[str, str], list[dict]] = {}
+    moderation: list[dict] = []
     for e in events:
-        if e.get("type") not in NOTIFY_TYPES:
+        t = e.get("type")
+        if t == "admin-claim":
+            code = e.get("code")
             continue
-        seen.setdefault(e.get("fp") or e.get("handle") or "?", []).append(e)
-    if not seen:
-        return None
+        if t in PRESENCE_TYPES:
+            seen.setdefault((e.get("room", ""), e.get("fp") or e.get("handle") or "?"), []).append(e)
+        elif t in NOTIFY_TYPES:
+            moderation.append(e)
+
     lines = []
     for evs in seen.values():
         types = [x.get("type") for x in evs]
         last = evs[-1]
         handle = last.get("handle", "someone")
+        room = f" [{last['room']}]" if last.get("room") else ""
         online = last.get("online")
-        tail = f" — {online} in room" if isinstance(online, int) else ""
+        tail = f" — {online} online" if isinstance(online, int) else ""
         if "join" in types and "leave" in types:
-            lines.append(f"{stamp(last['t'])}  {handle}: joined and left")
+            lines.append(f"{stamp(last['t'])}  {handle}: joined and left{room}")
         elif "join" in types:
-            lines.append(f"{stamp(last['t'])}  {handle} joined{tail}")
+            lines.append(f"{stamp(last['t'])}  {handle} joined{room}{tail}")
         elif "leave" in types:
-            lines.append(f"{stamp(last['t'])}  {handle} left{tail}")
+            lines.append(f"{stamp(last['t'])}  {handle} left{room}{tail}")
         else:
-            lines.append(f"{stamp(last['t'])}  {handle}: key rotated out of the pool")
-    return "PGP Room\n" + "\n".join(lines)
+            lines.append(f"{stamp(last['t'])}  {handle}: key rotated out of the pool{room}")
+
+    for e in moderation:
+        t = e.get("type")
+        at = stamp(e["t"])
+        if t == "ban":
+            scope = e.get("room") or "site-wide"
+            dur = f"{e.get('hours')}h" if e.get("hours") else "permanent"
+            extra = f" — {e['reason']}" if e.get("reason") else ""
+            lines.append(f"{at}  banned {e.get('target')} ({scope}, {dur}) by {e.get('by')}{extra}")
+        elif t == "unban":
+            lines.append(f"{at}  ban lifted by {e.get('by')}")
+        elif t == "room-create":
+            lines.append(f"{at}  room “{e.get('name')}” created by {e.get('by')}")
+        elif t == "room-delete":
+            lines.append(f"{at}  room “{e.get('name') or e.get('room')}” deleted by {e.get('by')}")
+        elif t == "member-op":
+            lines.append(f"{at}  {e.get('target')} {e.get('op')} in {e.get('room')} by {e.get('by')}")
+        elif t == "role":
+            lines.append(f"{at}  {e.get('target')} is now {e.get('role')} (by {e.get('by')})")
+        elif t == "settings":
+            lines.append(f"{at}  site settings: new rooms {'on' if e.get('allowNewRooms') else 'off'}, "
+                         f"guests {'on' if e.get('guestAccess') else 'off'} (by {e.get('by')})")
+        elif t == "admin-claimed":
+            lines.append(f"{at}  admin seat claimed by {e.get('username')}")
+        elif t == "login-failed":
+            lines.append(f"{at}  failed sign-in for “{e.get('username')}”")
+
+    summary = "PGP Room\n" + "\n".join(lines) if lines else None
+    return code, summary
 
 
 def main() -> int:
@@ -101,7 +148,7 @@ def main() -> int:
         return 1
 
     if "--test" in sys.argv:
-        text = "PGP Room — notifier online. You'll get a message here when someone joins or leaves."
+        text = "PGP Room — notifier online. You'll get a message here for joins, moderation actions, and any new bootstrap code."
         if ROOM_URL:
             text += f"\n{ROOM_URL}"
         for cid in CHATS:
@@ -140,18 +187,26 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
 
-    text = build_text(events)
+    code, text = build_text(events)
+    messages = []
+    if code:
+        messages.append(claim_text(code))
     if text:
+        messages.append(text)
+    for msg in messages:
         for cid in CHATS:
+            if "--dry" in sys.argv:
+                print(f"[dry] -> {cid}\n{msg}\n")
+                continue
             try:
-                tg_send(token, cid, text)
+                tg_send(token, cid, msg)
             except Exception as e:  # noqa: BLE001
                 print(f"send failed for {cid}: {e}", file=sys.stderr)
                 return 1
     with open(OFFSET_FILE, "w") as fh:
         fh.write(str(new_offset))
 
-    if os.path.getsize(EVENT_FILE) > MAX_EVENT_BYTES and not text:
+    if os.path.getsize(EVENT_FILE) > MAX_EVENT_BYTES and not messages:
         try:
             os.replace(EVENT_FILE, EVENT_FILE + ".1")
             with open(OFFSET_FILE, "w") as fh:

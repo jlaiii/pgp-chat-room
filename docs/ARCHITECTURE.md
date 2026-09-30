@@ -1,86 +1,129 @@
 # Architecture
 
-## Components
+```
+                    ┌──────────────────────────── relay (Node 22, one dep: ws) ───────────────────────────┐
+  browser           │  http.createServer ── static ── api: auth, rooms, keys, history, moderation, admin   │
+  ┌──────────┐      │        │                                                                             │
+  │ identity │      │        └── WebSocketServer /ws  (room-scoped: hello, send, switch, ping)             │
+  │ keypair  │◀────▶│  lib/rooms.js  permission matrix        lib/chat.js  per-room pools + ciphertext      │
+  │ ciphertext│     │  lib/auth.js   accounts/sessions/bans   lib/settings.js  site policy                    │
+  └──────────┘      └──────────────────────────────────────────────────────────────────────────────────────┘
+       ▲                                     data/ on disk: JSON + jsonl, ciphertext only
+       └── plaintext never crosses this line
+```
 
-| Component | Runs | Knows |
-|---|---|---|
-| `public/app.js` (+ vendored openpgp.js) | visitor's browser | its own private key, the room's public keys, this browser's history |
-| `server.js` | your host, loopback behind a TLS proxy | fingerprints, handles, ciphertext blobs, timestamps |
-| `scripts/telegram-notify.py` | your host (root timer, optional) | join/leave events only |
+## The load-bearing invariant
 
-Trust boundary: everything a browser encrypts is opaque to everything else.
+`server.js` and everything under `lib/` must stay **crypto-free**: no OpenPGP dependency, no
+private keys, no decryption path. A `npm i openpgp` inside this project — even as a "utility" —
+breaks the only interesting property it has. Ciphertext validation is structural only
+(`BEGIN PGP MESSAGE` header, size cap), never cryptographic.
 
-## Identity lifecycle
+Password hashing uses `node:crypto`'s scrypt. That is authentication, not message crypto: the
+hash never touches a message and cannot decrypt anything.
 
-1. `ensureIdentity()` reads `localStorage['pgpchat.identity.v1']`. Missing/corrupt → generate a
-   Curve25519 OpenPGP keypair and a random `adjective-animal-NN` handle.
-2. The public half is POSTed to `/api/keys`; the relay stores `{fp, keyId, handle, publicKey, joinedAt,
-   lastSeen}` in `keys.json` (debounced atomic rewrite). Re-posting an existing `fp` is a rename, not a
-   new member.
-3. On WebSocket `hello` the identity becomes *present*. Disconnects wait out an 8-second grace period
-   before a `left` notice, so reloads don't spam.
-4. Restoring from a `.asc` backup re-registers the same fingerprint → the original `joinedAt` and
-   therefore the original readable history window.
+## Modules
 
-## The key pool is the access model
+| file | responsibility |
+|---|---|
+| `server.js` | HTTP routing, static assets, security headers, WebSocket frames, presence, moderation *enforcement*, boot/migration |
+| `lib/util.js` | atomic writes, secure erase, cookies, ids/handles, regexes |
+| `lib/auth.js` | accounts (scrypt), sessions (30-day tokens), roles, bans (site-wide and per-room) |
+| `lib/rooms.js` | room registry, membership, `can(actor, action, room)` — **all permissions live here** so HTTP and WS cannot drift |
+| `lib/chat.js` | per-room key pools, per-room per-day ciphertext segments, retention shredder, room teardown |
+| `lib/settings.js` | the two site switches the admin panel flips, plus the bootstrap claim code |
+| `public/identity.js` | browser keypair, localStorage layout, backup/restore, password-wrapped envelope |
+| `public/app.js` | client state machine, API/WS clients, every view, all cryptography |
 
-- A message is encrypted with OpenPGP **multi-recipient** encryption: one session key, wrapped once per
-  recipient public key, plus a detached signature from the sender.
-- `recipients[]` on the stored record is the list of fingerprints the ciphertext was sealed to. It is
-  written by the sending client and never rewritten by the relay.
-- Therefore: a key registered *after* a message was sent is not in that message's `recipients`, and
-  cannot read it. `GET /api/history?fp=…` returns only rows where `fp ∈ recipients`, plus
-  `lockedCount` for the rest — that count drives the "N earlier messages can't be read" divider.
-- Pool growth is bounded: at `maxPool` the relay evicts the oldest *idle* key (never an online one);
-  evicted clients re-register automatically on their next connect (WS close code `1008` triggers a
-  re-register + pool refresh in the client).
-- Cost: ciphertext size grows with pool size (~250 bytes per extra recipient for the wrapped session
-  key). `maxMsgBytes` (128 KB) comfortably covers a few hundred recipients; the pool cap keeps it sane.
-
-## Storage layout
+## Data on disk
 
 ```
 data/
-├── keys.json                  {keys:[{fp,keyId,handle,publicKey,joinedAt,lastSeen}], savedAt}
-├── messages/
-│   └── 2026-09-11.jsonl       one JSON object per line: {id,seq,t,fp,handle,recipients[],ct}
-└── events.log                 {t,type:key|join|leave|evict,handle,fp,online} for the notifier
+├── settings.json                 {allowNewRooms, guestAccess, adminClaim, createdAt}
+├── accounts.json                 [{username, salt, hash, scryptN, role, createdAt, lastLogin, keyFp, syncKey}]
+├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
+├── bans.json                     [{id, kind, target, room, until, reason, by, at}]
+├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles}]
+├── events.log                    append-only audit trail (join/leave/key/ban/role/settings/admin-claim…)
+└── rooms/
+    └── <roomId>/
+        ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
+        └── messages/<utc-day>.jsonl   one ciphertext row per line
 ```
 
-Why per-day segments: retention can delete whole files (overwrite + unlink), and it bounds the work
-per sweep. Why an append-only line format instead of a database: the payload is opaque, the read path
-is `filter + slice`, and a text file is inspectable with `grep`. In-memory `messages[]` is the serving
-copy and is filtered to the retention window at load and on every sweep.
+Durability is deliberate and split: **identity and moderation writes are synchronous**
+(`saveNow()` — a lost ban is unacceptable), while high-frequency traffic (`lastSeen`, key
+bindings, presence) rides an 800 ms debounce.
 
-## Message path
+### Migration from the single-room layout
 
-```
-send:    render optimistic bubble -> encrypt(pool public keys, sign) -> WS {send, tmpId, ct, recipients}
-relay:   validate -> stamp {id, seq, t} -> append to today's segment -> fan out
-author:  receives the same frame WITH tmpId -> finalizes the bubble already on screen
-others:  receive it without tmpId -> decrypt with own private key -> verify sender signature -> render
-reconnect: GET /api/pool + GET /api/history -> dedupe by message id -> reconcile unacked bubbles
-```
+On boot, `chat.migrateLegacy()` moves `data/keys.json` → `data/rooms/lounge/keys.json` and
+`data/messages/` → `data/rooms/lounge/messages/`, so an existing room becomes the lounge and
+already-registered handles keep working untouched. `data/messages.jsonl` (the pre-retention
+layout) is renamed aside rather than deleted.
 
-Ordering guarantee: the author's copy is sent after the store calls, on the same socket the client used
-to send, so a client can always match its optimistic bubble to the stored message.
+## Permission matrix
 
-## Presence, notifications, retention
+`actor = {kind: account|guest, username, handle, role, fp}`; `role` is resolved from the account
+record on every request, so a promotion or demotion applies to **live sockets** too.
 
-- Presence is derived from live sockets (`online` map keyed by fingerprint); the relay broadcasts
-  `{t:'presence'}` and `{t:'sys'}` notices. It is intentionally *not* persisted per-connection.
-- `events.log` is append-only and read by `telegram-notify.py` from a byte offset, so notifications
-  survive relay restarts and never replay.
-- Retention: `cleanup()` runs at boot and every `cleanupMinutes`. Whole expired day-segments are
-  overwritten with random bytes (2 passes, `fsync`) and unlinked; the boundary segment is rewritten
-  without expired rows after shredding the original; memory is filtered to the same cutoff. The window
-  is published to clients (`retentionHours`), which prune their own DOM on a 60-second timer.
+| action | guest | user | mod | admin | room owner / room mod |
+|---|---|---|---|---|---|
+| view public room | yes | yes | yes | yes | yes |
+| view private room | no | member only | **member only** | **yes (enter any room)** | yes |
+| join public room | if `guestOk` + guests enabled | yes | yes | yes | yes |
+| join private room | no | request → approval | request → approval | direct | direct |
+| post | if `guestOk` + not frozen | if not frozen | yes (through a freeze) | yes | yes |
+| register a key in the room | if readable | if readable | if readable | yes | yes |
+| freeze / privacy / rename | no | owner only | yes | yes | yes |
+| approve, deny, kick, room-mod | no | owner only | yes | yes | yes |
+| ban (per room) | no | owner only | yes | yes | yes |
+| ban (site-wide) | no | no | users + guests | users, mods, guests (never an admin) | no |
+| create a room | no | if `allowNewRooms` | yes | always | — |
+| delete a room | no | own room | own room | any (not the lounge) | own room |
+| site settings, roles | no | no | no | yes | no |
 
-## Deliberate non-features
+Two consequences worth knowing:
 
-- No accounts, no server-side search, no push notifications, no moderation tools (the operator cannot
-  read what it cannot decrypt; abuse handling has to be socket/IP level).
-- No per-message forward secrecy or ratcheting: PGP multi-recipient is a snapshot model. Deleting a
-  member removes them from *future* messages only.
-- No message editing/deletion by users: there is no authenticatable author-to-record binding beyond
-  the signature, and the relay is not a trusted authority.
+- **A mod cannot read a private room they were not invited to.** Free *read* would also mean free
+  *key registration*, i.e. a self-invite into somebody else's room. Only an admin has the
+  enter-any-room power, and it is visible in the admin panel.
+- **Freezing is not muting.** Mods, room mods and the owner keep posting so they can explain the
+  freeze, settle the dispute, then unfreeze.
+
+## Message flow
+
+1. The client fetches the room's pool, registers its own public key there (idempotent; re-posting
+   with a new handle is a rename), then opens the WebSocket and sends `hello`.
+2. `hello` is gated on a session, a ban check, room readability and a **registered key** — a socket
+   with no key in that room's pool is refused with `register your key first`.
+3. `send` is gated on `can('post')`. Recipients are intersected with the room's pool, so a sender
+   cannot fan a message out to fingerprints from somewhere else; the author is always a recipient.
+4. The row is appended to that room's day segment, then fanned out **to sockets in that room only**
+   — the author's own socket receives its `tmpId` so the optimistic bubble is finalized instead of
+   duplicated.
+5. `GET /api/rooms/<id>/history?fp=` returns only rows whose `recipients[]` include that
+   fingerprint, plus `lockedCount`, which is what the "sealed to an older key" divider renders.
+
+## Retention
+
+`retentionHours` (default 48) is published in `/healthz`, `/api/rooms/<id>/pool` and
+`/api/rooms/<id>/history`, and the client adopts it — never hardcode the window client-side.
+Each sweep:
+
+- shreds whole expired day-segments (random overwrite ×2, fsync, unlink),
+- rewrites the boundary segment without expired lines (old file shredded first) and leaves a
+  0-byte stub behind, which is erased once its day passes the cutoff,
+- filters in-memory rows to the same cutoff,
+- runs **at boot as well as on the interval** (a restart must not leave expired ciphertext lying
+  around for a minute).
+
+Deleting a room shreds its pool file, every segment and then the directory.
+
+## Why the client is three files
+
+`index.html` is `no-store`; the JS/CSS are served `immutable`. After editing a client asset,
+bump its `?v=` in `index.html` or a browser will happily run the old one. `identity.js` does not
+share a scope with `app.js` — anything it needs must be defined inside it. (A missing global in
+there throws inside key generation, the least visible place in the app: nothing renders, and the
+error lands in a pane that is already hidden.)

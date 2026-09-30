@@ -1,161 +1,143 @@
 # PGP Room
 
-**End-to-end encrypted group chat in the browser. The server stores ciphertext it cannot read — not even root can.**
+Self-hosted, end-to-end encrypted group chat with real rooms, accounts and moderation.
+Every message is encrypted **and signed in the browser** before it is sent, so the server
+stores ciphertext it cannot read — and holds no key that could ever open it.
 
-One public room, one link. Every visitor's browser generates their own OpenPGP keypair and a random
-handle; every message is encrypted **in the browser** to every public key in the room's key pool *at the
-moment it is sent*, and signed by the sender. A key that registered later cannot read earlier
-ciphertext, because it was never a recipient of it. Messages self-destruct after the retention window
-(48 hours by default) on the server **and** in every open client.
-
-Built for small groups who want a shared room without trusting whoever runs the box.
+The room where this started was a single public chat. It is now a multi-room relay with a
+public lounge, private rooms, guests, three staff levels and an admin panel — while keeping
+the original promise: the relay has no OpenPGP library, no private keys and no decryption
+code path.
 
 ```
-┌──────────────────┐          ┌───────────────────────────┐          ┌──────────────────┐
-│  Browser A       │          │  Relay (storage only)     │          │  Browser B       │
-│  keypair A       │          │  no keys, no crypto lib   │          │  keypair B       │
-│                  │  HTTPS   │                           │   WSS    │                  │
-│  encrypt(msg,    │ ───────► │  {id, t, fp, recipients,   │ ───────► │  decrypt(key B)  │
-│   [pubA, pubB])  │   WSS    │   ct: "-----BEGIN PGP…"   │          │  verify(sig A)   │
-└──────────────────┘          │  }                        │          └──────────────────┘
-                              │  data/messages/<day>.jsonl│
-                              └───────────────────────────┘
+browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser B, C, D
+     ▲                                                     │
+     └────────────── keys never leave the browser ──────────┘
 ```
 
-## What it looks like
-
-<p>
-  <img src="docs/img/room-mobile.png" width="330" alt="PGP Room on a phone: three participants, verified signature check marks, retention notice">
-  <img src="docs/img/room-desktop.png" width="580" alt="PGP Room in a desktop browser">
+<p align="center">
+  <img src="docs/img/signin-mobile.png" width="240" alt="Sign in, create an account, or continue as a guest">
+  <img src="docs/img/room-controls-mobile.png" width="240" alt="Room controls: freeze, privacy, guest access, files">
+  <img src="docs/img/admin-mobile.png" width="240" alt="Moderation and admin: site settings, accounts, rooms, bans">
 </p>
 
-## Features
+## What it does
 
-- **Real end-to-end encryption.** OpenPGP (Curve25519 ECDH + Ed25519) generated and used in the
-  browser via [openpgp.js](https://openpgpjs.org/). Private keys never leave `localStorage`.
-- **Key-pool access model.** A message is readable by exactly the keys that existed when it was sent,
-  so new joiners get the new conversation, not the archive.
-- **Signed messages.** Every message carries the sender's signature, verified in the recipient's
-  browser (a check mark appears on verified bubbles).
-- **No accounts, no email, no database.** Random handle + keypair on first visit. The relay keeps
-  ciphertext in append-only per-day files.
-- **Retention built in.** 48-hour default window; expired ciphertext is overwritten and unlinked on
-  the server and pruned from open tabs.
-- **Tiny surface.** The server is one Node file with a single runtime dependency (`ws`). The client is
-  vanilla ES2020 + one vendored crypto bundle. No framework, no build step, no CDN, no third-party
-  origins (strict CSP).
-- **Mobile-first UI.** Dark, slim header, 44px touch targets, safe-area aware, animated but restrained.
+- **Rooms.** A public lounge that everyone lands in, plus any number of rooms users create.
+  Each room has **two independent locks**: *freeze* (readable, but only mods and the owner
+  may post) and *private* (hidden from the list, entry needs approval).
+- **Identity, three ways.** Sign in with username + password, create an account, or continue
+  as a **guest** — a random handle with no account, limited to rooms that welcome guests.
+- **Roles.** `admin` › `mod` › `user` › `guest`. Admins run the site and can enter any room;
+  mods handle people and rooms; the owner of a room controls that room.
+- **Moderation.** Ban or **temp-ban** (1h … 30 days) an account site-wide or per-room, kick
+  someone from a room, approve or deny join requests, promote room mods, freeze a room,
+  delete a room (its key pool and ciphertext are shredded with it).
+- **Admin panel.** Turn new rooms off, turn guest access off, freeze/unfreeze any room, change
+  roles, review active bans, watch relay totals.
+- **Handles and keys.** Each browser makes its own Curve25519 keypair on first visit. Rename a
+  guest handle, download or restore a key backup, and optionally **sync your key**: the private
+  key is wrapped in the browser with a key derived from your password (PBKDF2 250k → AES-GCM)
+  and the server stores only that sealed envelope.
+- **Self-destructing.** Ciphertext is shredded after the retention window (48h by default) —
+  overwritten twice, fsynced, unlinked — and expired bubbles are pruned in open tabs too.
+
+## What the relay knows
+
+End-to-end encryption protects **message content**. Running a moderated, multi-room chat means
+the relay necessarily knows some *metadata* — and it is better to say so plainly:
+
+| The relay stores | The relay can never see |
+|---|---|
+| usernames and scrypt password hashes | message plaintext |
+| session tokens (30-day, HttpOnly cookie) | anyone's private key |
+| room names, membership, room mods, join requests | the contents of the sync envelope |
+| bans (target, scope, expiry, reason) | attachments (they are encrypted client-side) |
+| message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
+| the optional **sealed** key envelope (opaque; no password ever reaches the server) | |
+
+Guest bans are **best-effort**: a guest is blocked by device fingerprint and IP, so clearing
+site data is a way around one. Bans against accounts are solid — their sessions are dropped
+immediately and they cannot sign back in.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/jlaiii/pgp-chat-room.git
-cd pgp-chat-room
-npm install
+git clone https://github.com/jlaiii/pgp-chat-room.git && cd pgp-chat-room
+npm install                      # one dependency: ws
 cp config.example.json config.json
-npm start                       # -> http://127.0.0.1:8788
+npm start                        # http://127.0.0.1:8788
 ```
 
-Browsers only expose WebCrypto (which openpgp.js needs) in a **secure context**: `http://localhost`
-and `http://127.0.0.1` are exempt, any real deployment must be HTTPS. See
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the systemd + Caddy/nginx recipe.
+Serve it behind HTTPS — `crypto.subtle` and `getUserMedia`-free operation still require a
+secure origin for WebCrypto. Caddy is three lines:
 
-## How it works
+```
+chat.example.com {
+    reverse_proxy 127.0.0.1:8788
+}
+```
 
-1. First visit: the browser generates an OpenPGP keypair, picks a random handle (`quiet-otter-42`),
-   stores the identity in `localStorage`, and registers the **public** key with the relay.
-2. The relay keeps the *key pool* (fingerprints + public keys). It broadcasts additions so every open
-   tab can encrypt to the newest member.
-3. Sending: the client fetches the pool, encrypts once with multiple recipients
-   (`encryptionKeys: [...pool]`), signs with its own private key, and posts the ASCII-armored
-   ciphertext over the WebSocket.
-4. The relay stores `{id, seq, t, fp, handle, recipients[], ct}` and fans the frame out. It never
-   sees plaintext and has no OpenPGP library installed.
-5. History: `GET /api/history?fp=<yours>` returns only the messages whose `recipients` include your
-   fingerprint, plus a `lockedCount` for the rest — that is what the "N earlier messages can't be
-   read" divider is.
+### Claiming the first admin
 
-More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · wire format:
-[docs/PROTOCOL.md](docs/PROTOCOL.md)
-
-## Security model
-
-| Guarantee | How |
-|---|---|
-| The host cannot read messages | Private keys only ever exist in browsers; the server has no crypto library and no keys (`npm ls openpgp` on the server is empty) |
-| Stolen disk / backups leak nothing readable | Only ASCII-armored ciphertext is ever written to disk |
-| History is not retroactively exposed | Messages are sealed to the pool at send time; a later key is not a recipient |
-| Tampering is detectable | Every message is signed; recipients verify against the sender's registered public key |
-| No third-party data paths | Single origin, strict CSP, no CDN, no analytics, no external fonts |
-| Messages don't linger | 48h retention: overwritten + unlinked server-side, pruned in open tabs |
-
-**Honest limits** (read [docs/SECURITY.md](docs/SECURITY.md) before trusting it with anything):
-
-- It is a **public room**: anyone with the link can join and read everything from that point on.
-- **Per-device identity.** A phone and a laptop are two different identities with separate histories;
-  the key backup (`.asc`) is the only way to move devices, and losing it loses that history forever.
-- The operator can **censor the relay** (drop, reorder, or refuse to store frames) but cannot decrypt.
-- Overwrite-before-unlink is best effort on a journalled/CoW filesystem; the durable guarantee is that
-  what is deleted is ciphertext nobody can open.
+The first account is a normal `user`; the admin seat is **claimed**, never assumed. On first
+boot with no admin, the relay generates a one-time 8-character code, writes it to
+`data/settings.json` and emits an `admin-claim` event. `scripts/telegram-notify.py` (or your
+own reader of `data/events.log`) delivers it to the operator. Then: create your account in the
+app → *Moderation & admin → Claim admin* → enter the code. It burns on use.
 
 ## Configuration
 
-`config.json` (start from `config.example.json`; `PGPCHAT_CONFIG=/path/to.json` overrides the location):
+`config.json` (see `config.example.json`):
 
-| Key | Default | Meaning |
+| key | default | meaning |
 |---|---|---|
-| `port` / `bind` | `8788` / `127.0.0.1` | listen address (keep it on loopback behind a TLS proxy) |
-| `publicUrl` | `""` | public room URL; used for the CSP WebSocket origin |
-| `retentionHours` | `48` | message lifetime, enforced server-side and published to clients |
+| `port` / `bind` | `8788` / `127.0.0.1` | where the relay listens |
+| `publicUrl` | — | used for the CSP WebSocket origin and cookie `Secure` flag |
+| `retentionHours` | `48` | message lifetime, published to clients and enforced by the shredder |
 | `cleanupMinutes` | `1` | how often the retention sweep runs |
-| `trustProxy` | `true` | read `X-Forwarded-For` (only behind your own proxy) |
-| `maxPool` | `500` | key pool cap; oldest idle keys are evicted above it |
-| `maxMsgBytes` | `131072` | ciphertext size cap (a message encrypted to ~300 keys is ~90KB) |
-| `historyLimit` | `400` | messages returned per history fetch |
-| `rate` | 25 msgs / 8 keys / 40 conns per IP per minute | abuse bounds |
+| `auth.scryptN` | `16384` | password hashing cost (lower it only in tests) |
+| `maxPool` | `500` | keys per room before idle ones are evicted |
+| `maxMsgBytes` | `131072` | ciphertext cap per message |
+| `rate.*` | 25/8/40/10/10 | per-minute per-IP caps: messages, key registrations, connections, auth, guest sessions |
 
-## Retention
+## Layout
 
-Messages live `retentionHours` and then are gone — from memory, from disk, and from open tabs:
+```
+server.js               relay: HTTP + WebSocket, routing, moderation enforcement
+lib/auth.js             accounts, scrypt hashing, sessions, roles, bans
+lib/rooms.js            room registry + the permission matrix (the only place permissions live)
+lib/chat.js             per-room key pools, ciphertext segments, retention shredder
+lib/settings.js         site policy the admin panel flips
+public/index.html       the app shell
+public/identity.js      keypair generation, storage, backup, password-wrapped sync
+public/app.js           client: auth, rooms, chat, moderation UI, all cryptography
+test/integration.mjs    end-to-end suite: crypto invariants + rooms + roles + bans
+```
 
-- Per-day segment files `data/messages/<UTC-day>.jsonl`. Each sweep overwrites whole expired segments
-  with random bytes (2 passes + `fsync`) and unlinks them; the boundary segment is rewritten without
-  the expired rows and the old file is shredded first.
-- The client prunes expired bubbles on a 60s timer and takes the window **from the server**, so the
-  two never disagree.
-- `/api/pool`, `/api/history` and `/healthz` all publish `retentionHours`.
+Data lives in `data/` — `accounts.json`, `sessions.json`, `bans.json`, `rooms.json`,
+`settings.json`, and per room `rooms/<id>/keys.json` + `rooms/<id>/messages/<utc-day>.jsonl`.
 
 ## Testing
 
 ```bash
-npm test
+npm test        # spawns a real relay against a temp data dir; no live room touched
 ```
 
-`test/integration.mjs` boots a real server on a temp data directory and asserts the things that
-matter: a later-joining key **cannot** read earlier ciphertext, messages sent after it joins decrypt
-and verify, a non-recipient key fails to decrypt, nothing plaintext lands on disk, the rate limiter
-engages, and the retention restart wipes expired rows. CI runs it on every push
-(`.github/workflows/test.yml`).
+The suite asserts the properties this project actually promises: a key that joins later cannot
+read earlier ciphertext, post-join messages decrypt *and verify*, non-recipients fail, only
+ciphertext reaches disk, the rate limiter engages, the retention sweep empties segments, a
+private room stays invisible to non-members, a freeze blocks ordinary members but not mods or
+owners, and a ban drops the live socket. CI runs it on every push.
 
-There is also a browser-side harness for live delivery — see
-[docs/TESTING.md](docs/TESTING.md) — used to prove that a message reaches an open tab in well under a
-second (headless tabs freeze, which makes naive multi-browser checks lie).
+## Honest limits
 
-## Repo layout
+- **Overwrite-before-unlink is best-effort** on journalled/CoW storage and provider snapshots.
+  The real guarantee is that deleted bytes are ciphertext whose keys only ever lived in browsers.
+- **No account recovery.** Lose your device *and* your backup file (and any synced envelope) and
+  your history is gone. That is the design, not a bug.
+- **Key sync depends on your password.** The envelope is only as strong as the password you chose.
+- **A weaker password is a weaker door** — regardless of the 250k-round KDF.
+- **Guests are anonymous by definition**: a fresh device is a fresh identity.
 
-```
-server.js               relay: HTTP + WebSocket, ciphertext storage, presence, retention sweep
-public/index.html       single page app shell
-public/app.js           all client logic: keygen, encrypt/decrypt/sign, UI, retention pruning
-public/style.css        dark mobile-first theme
-public/vendor/          vendored openpgp.min.js (refresh with: npm run vendor)
-scripts/telegram-notify.py   optional join/leave notifications (Telegram Bot API)
-scripts/vendor.mjs      copies openpgp from node_modules into public/vendor
-deploy/                 systemd unit + Caddy/nginx examples
-test/integration.mjs    end-to-end test suite
-docs/                   architecture, protocol, security, deployment, testing, contributing
-```
-
-## License
-
-MIT. Vendored [openpgp.js](https://github.com/openpgpjs/openpgpjs) is LGPL-3.0.
+MIT licensed.

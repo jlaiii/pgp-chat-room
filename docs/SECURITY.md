@@ -1,78 +1,115 @@
 # Security model
 
-Read this before putting anything sensitive in the room.
+## The claim
 
-## Threat model
+The relay stores and forwards **ciphertext only**. It has no OpenPGP library, no private keys and
+no decryption code path, so whoever runs the box cannot read anyone's messages — not with root,
+not with a database dump, not with a backup from last week.
 
-| Adversary | Outcome |
-|---|---|
-| Network observer / your ISP | Sees TLS (or, if you misconfigure it, nothing at all — see below). No plaintext, no keys. |
-| Host operator (root on the server) | Reads fingerprints, handles, counts, timestamps, ciphertext. **Cannot decrypt messages.** |
-| Someone who steals a disk image / backup / snapshot | Same as above: armor only. |
-| Another member of the room | Can read everything from their own join time forward, by design. |
-| A malicious member | Can send garbage, spoof handles (handles are self-asserted), flood within limits, register many keys. Cannot forge another member's signature. |
+Each browser generates its own Curve25519 keypair on first visit. Messages are encrypted to every
+public key in that room's pool at send time and signed by the sender. A key that registers later
+cannot read earlier ciphertext: it was never a recipient. That is a feature request from the
+original build, preserved exactly.
 
-## What protects what
+## What the relay does know
 
-- **Confidentiality of content**: OpenPGP public-key encryption, Curve25519 ECDH + Ed25519,
-  performed by openpgp.js 6.x in the browser. One session key per message, wrapped once per recipient.
-- **Integrity + authenticity**: every message is signed by the sender's private key; the recipient
-  verifies against the public key registered for that sender's fingerprint. Verified messages get a
-  check mark. A failed or missing signature is shown, not hidden.
-- **Key custody**: private keys are generated with the browser CSPRNG and stored only in
-  `localStorage`. They are never transmitted, not even to load history.
-- **Transport**: run it behind HTTPS. WebCrypto (`crypto.subtle`, required by openpgp.js) is
-  unavailable in insecure contexts, so the app refuses to work over plain HTTP on a real hostname —
-  that failure is a feature.
-- **Server hardening**: single dependency (`ws`), no crypto library, strict CSP (`'self'` plus the
-  WebSocket origin), `no-store` on API responses, `X-Frame-Options: DENY`, `nosniff`, HSTS, no
-  third-party origins, no access-log of message content (the relay logs counts and fingerprints only).
-- **Abuse bounds**: per-IP rate limits on messages/key registrations/connects, ciphertext and key size
-  caps, recipient cap, key-pool cap with idle eviction.
+Rooms, roles and moderation require the server to hold identity metadata. This is the honest
+change from the single-room build, and it is worth being precise about:
 
-## Metadata the server necessarily sees
+| stored | why | exposure if the box is compromised |
+|---|---|---|
+| username, scrypt hash (N=16384, r=8, p=1), salt | sign-in | offline password cracking, cost set by scrypt |
+| session token (30 days, `HttpOnly`, `SameSite=Lax`, `Secure`) | stay signed in | a stolen token is that session until it expires |
+| room names, membership, room mods, join requests | routing and approvals | who is in what room |
+| bans (target, scope, expiry, reason) | moderation | who was punished and why |
+| message metadata (id, seq, time, room, author handle + fingerprint, recipient fingerprints) | delivery and history | a social graph and timing pattern |
+| sync envelope (optional) | multi-device | an AES-GCM blob; useless without the password |
 
-Fingerprint, handle (self-asserted, changeable), message timestamps, message sizes, recipient counts,
-IP addresses (for rate limiting; not persisted), connection times. If that is too much, this design is
-the wrong tool — a relay cannot both route ciphertext and hide its own routing.
+None of that reveals a single message body.
 
-## Honest limits
+## Password handling and key sync
 
-1. **It is a public room.** Anyone with the link can join, read everything from that moment on, and
-   participate. There is no invite list, no per-member ACL, no revocation of someone who already read
-   a message.
-2. **Snapshot, not ratchet.** PGP multi-recipient gives no per-message forward secrecy and no
-   post-compromise security. If a browser's stored private key is later compromised, it decrypts every
-   message that browser was ever a recipient of (until retention deletes the ciphertext — which is a
-   genuine mitigation, see below).
-3. **Identity is per device.** Two devices are two identities with disjoint histories. The `.asc`
-   backup is the only way to move history; losing both the browser storage and the backup loses that
-   history permanently. There is no recovery path and no password reset.
-4. **Secure deletion is best effort.** Retention overwrites files with random bytes and unlinks them,
-   but filesystem journaling, copy-on-write, SSD wear levelling, VM snapshots and provider backups can
-   retain blocks. The durable guarantee is that deleted bytes are ciphertext whose private keys only
-   ever existed in browsers.
-5. **Handles are cosmetic.** They are not authenticated identities. The fingerprint is the identity; a
-   signature check tells you which *key* spoke, not which human.
-6. **The operator can censor and correlate.** Dropping frames, refusing to store, or lying about order
-   is possible; decryption is not.
-7. **`localStorage` is not a vault.** Malware, a hostile browser extension, or someone holding an
-   unlocked phone with the tab open can read the key. Use the key backup and treat devices as the
-   security boundary.
-8. **No deniability.** Signatures are non-repudiable to anyone who has the ciphertext and the public
-   keys — which includes everyone in the room.
+- Passwords are hashed with `node:crypto` **scrypt** (per-account salt, per-account `N`),
+  compared with `timingSafeEqual`.
+- An unknown username still performs a scrypt derivation, so the response time does not disclose
+  whether an account exists.
+- Changing a password invalidates that account's other sessions and re-wraps the synced envelope.
+- **Key sync is opt-in and deliberately weak-by-design-dangerous:** the private key is encrypted in
+  the browser with PBKDF2(SHA-256, 250 000 rounds) → AES-256-GCM, and the server stores the
+  envelope. The server never receives the password, so it cannot open it — but a weak password can
+  be attacked offline against a stolen envelope. The UI says so, and prompts to keep a backup file
+  as well. Password sync is a convenience layer; the backup file is the real recovery path.
 
-## Operational checklist for a deployment
+## Authorization
 
-- [ ] HTTPS only (reverse proxy with a real certificate; `bind` stays on loopback)
-- [ ] `data/` owned by the service user; unit uses `ProtectSystem=strict` + `ReadWritePaths`
-- [ ] `retentionHours` set to what you actually want to lose
-- [ ] Telegram/notification token, if used, kept outside the app directory and out of the repo
-- [ ] Confirm for yourself that the host cannot decrypt: `npm ls openpgp` on the server shows nothing,
-      and `grep -c "BEGIN PGP MESSAGE" data/messages/*.jsonl` is the only thing in there
-- [ ] Treat the invite link as the access control it is: don't post it publicly by accident
+`lib/rooms.js` is the single source of truth (`can(actor, action, room)`), used identically by the
+HTTP layer and the WebSocket layer so the two cannot drift. Roles resolve from the account record
+on every request, so a demotion takes effect on sockets that are already connected.
+
+Points that were deliberate decisions rather than accidents:
+
+- **A mod cannot read a private room they are not in.** Read access would also grant *key
+  registration*, which would be a self-invite into somebody else's room. Only `admin` has the
+  enter-any-room power, and it is listed in the admin panel as such.
+- **Recipients are intersected with the room's pool** before a message is stored, so a malicious
+  sender cannot fan ciphertext out to fingerprints from another room.
+- **Admins cannot ban admins**, and the last admin can never be moderated; nobody can change their
+  own role, so a compromised session cannot silently seize the site.
+- **Bans act immediately**: the account's sessions are dropped and matching live sockets receive a
+  `kick` frame and close with 1008.
+- **Room deletion shreds** the pool file, every segment, then the directory.
+
+## Retention and deletion
+
+`retentionHours` (48 default) is enforced server-side *and* adopted by clients. Expired segments
+are overwritten with random bytes twice, fsynced and unlinked; boundary segments are rewritten
+(old file shredded first); in-memory rows are filtered to the same cutoff; the sweep runs at boot
+as well as on its interval.
+
+Be honest about the limit: **overwrite-before-unlink is best-effort** on journalled or CoW
+filesystems, SSD wear-levelling and provider snapshots. The meaningful guarantee is not that the
+bytes are unrecoverable — it is that the bytes were ciphertext whose keys only ever existed in
+browsers.
+
+## Transport and browser hardening
+
+- HTTPS only in practice; WebCrypto (`crypto.subtle`) requires a secure origin, so plain HTTP
+  cannot even run the client.
+- Strict CSP (`default-src 'self'`, no inline script or style, `connect-src 'self'` + the
+  wss origin derived from `publicUrl`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`,
+  `noindex`, restrictive `Permissions-Policy`, HSTS.
+- Same-origin enforcement on state-changing requests (an `Origin` header that does not match
+  `Host` is refused outright), on top of `SameSite=Lax` cookies.
+- Per-IP rate limits on messages, key registrations, connections, auth attempts and guest sessions.
+
+## Guest bans are best-effort
+
+A guest is anonymous: they are blocked by device fingerprint (and IP). Clearing site data, or a
+new device, is a new identity. If you need a ban that actually holds, point the person at an
+account — account bans drop live sessions immediately and survive everything short of you lifting
+them.
+
+## Verifying the claim yourself
+
+```bash
+# the relay must not link OpenPGP at all (only the browser bundle has it)
+grep -rn "openpgp" server.js lib/ || echo "relay is crypto-free"
+
+# stored rows are ciphertext
+grep -c "BEGIN PGP MESSAGE" data/rooms/*/messages/*.jsonl
+
+# no plaintext anywhere in the data directory
+grep -ril "<some sent phrase>" data/ || echo "nothing in the clear"
+
+# passwords are hashes
+grep -c '"hash"' data/accounts.json
+```
+
+`npm test` asserts the same properties from the outside: later keys cannot decrypt earlier
+ciphertext, non-recipients fail, only ciphertext reaches disk, the sweeper empties segments, and
+the authorization boundaries (private rooms, freezes, bans) hold.
 
 ## Reporting
 
-Found a flaw? Open an issue without exploit details, or contact the maintainer privately via the
-address on their GitHub profile.
+This is a personal self-hosted deployment. If you are running your own copy, treat operator access
+to the box as equivalent to access to the metadata table above — and to nothing more.

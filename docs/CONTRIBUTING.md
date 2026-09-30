@@ -40,7 +40,7 @@ PGPCHAT_CONFIG=/tmp/scratch/config.json npm start
    `hello`).
 9. **Keep `[hidden]{display:none!important}` in `style.css`**; several components rely on it and class
    rules with `display` otherwise win over the attribute.
-10. **Bump `?v=N` in `public/index.html`** when you touch `app.js` or `style.css` (they are served
+10. **Bump `?v=N` in `public/index.html`** when you touch `app.js`, `identity.js` or `style.css` (they are served
     `immutable`; the shell is `no-store`, which makes the bump effective).
 
 ## Practical notes

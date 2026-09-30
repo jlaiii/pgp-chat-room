@@ -4,85 +4,254 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
+<meta name="description" content="End-to-end encrypted chat rooms. The server stores ciphertext it cannot read.">
 <title>PGP Room</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236c8cff' d='M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=5">
+<link rel="stylesheet" href="/style.css?v=6">
 </head>
 <body>
 
-<header class="hdr">
-  <div class="hdr-l">
-    <span class="dot off" id="connDot" aria-hidden="true"></span>
-    <svg class="lock" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
-    <h1>PGP Room</h1>
-    <span class="tag">end-to-end</span>
+<!-- ---------- signed out ---------- -->
+<main class="auth" id="authScreen" hidden>
+  <div class="auth-card">
+    <div class="brand">
+      <svg class="lock" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
+      <h1>PGP Room</h1>
+      <p class="brand-sub">End-to-end encrypted rooms. Messages are encrypted and signed in your browser, and the server only ever stores ciphertext.</p>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button class="auth-tab on" data-mode="login" type="button">Sign in</button>
+      <button class="auth-tab" data-mode="register" type="button">Create account</button>
+      <button class="auth-tab" data-mode="guest" type="button">Guest</button>
+    </div>
+
+    <section class="pane" id="paneLogin">
+      <label class="field"><span class="field-label">Username</span>
+        <input class="input" id="loginUser" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+      <label class="field"><span class="field-label">Password</span>
+        <input class="input" id="loginPass" type="password" autocomplete="current-password"></label>
+      <button class="btn primary wide" id="btnLogin" type="button">Sign in</button>
+    </section>
+
+    <section class="pane" id="paneRegister" hidden>
+      <label class="field"><span class="field-label">Username</span>
+        <input class="input" id="regUser" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="2-24 characters, a-z 0-9 - _"></label>
+      <label class="field"><span class="field-label">Password</span>
+        <input class="input" id="regPass" type="password" autocomplete="new-password" placeholder="at least 8 characters"></label>
+      <button class="btn primary wide" id="btnRegister" type="button">Create account</button>
+      <p class="note">Your password signs you in. Message encryption uses a key made in this browser, so the server still cannot read anything you send.</p>
+    </section>
+
+    <section class="pane" id="paneGuest" hidden>
+      <label class="field"><span class="field-label">Pick a handle</span>
+        <input class="input" id="guestHandle" autocapitalize="none" spellcheck="false"></label>
+      <div class="row-actions">
+        <button class="btn" id="btnRegenHandle" type="button">New handle</button>
+        <button class="btn primary" id="btnGuest" type="button">Enter as guest</button>
+      </div>
+      <p class="note">Guests can read and post in public rooms. No account, no rooms of your own, nothing tracking you beyond an anonymous handle.</p>
+    </section>
+
+    <p class="auth-note" id="authNote"></p>
   </div>
-  <div class="hdr-r">
-    <span class="online" id="onlineCount">–</span>
-    <button class="me" id="meBtn" type="button">
-      <span class="swatch" id="mySwatch"></span>
-      <span id="myHandle">…</span>
+</main>
+
+<!-- ---------- signed in ---------- -->
+<div class="app" id="appScreen" hidden>
+  <header class="hdr">
+    <div class="hdr-l">
+      <button class="icon-btn" id="btnRail" type="button" aria-label="Rooms">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v2H3V6Zm0 5h18v2H3v-2Zm0 5h18v2H3v-2Z"/></svg>
+      </button>
+      <span class="dot off" id="connDot" aria-hidden="true"></span>
+      <h1 id="roomName">Room</h1>
+      <span class="tag" id="roomTag">end to end</span>
+    </div>
+    <div class="hdr-r">
+      <span class="online" id="onlineCount">–</span>
+      <button class="icon-btn" id="roomSheetBtn" type="button" aria-label="Room settings" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h10v2H3V6Zm14 0h4v2h-4V6ZM3 16h4v2H3v-2Zm8 0h10v2H11v-2ZM11 4h2v6h-2V4Zm-4 6h2v6h-2v-6Z"/></svg>
+      </button>
+      <button class="me" id="meBtn" type="button">
+        <span class="swatch" id="meSwatch"></span>
+        <span id="meHandle">…</span>
+        <span class="role-chip" id="roleChip" data-role="guest">Guest</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" hidden>
+    <div class="spin" id="bannerSpin" aria-hidden="true"></div>
+    <div class="banner-txt" id="bannerText"></div>
+    <button class="x" id="bannerClose" type="button" aria-label="Dismiss">
+      <svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg>
     </button>
   </div>
-</header>
 
-<div class="banner" id="banner">
-  <div class="spin" id="bannerSpin" aria-hidden="true"></div>
-  <div class="banner-txt" id="bannerText">Setting up your key…</div>
-  <button class="x" id="bannerClose" type="button" aria-label="Dismiss" hidden>
-    <svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg>
-  </button>
+  <main class="log" id="log">
+    <div class="lockdivider" id="lockDivider" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
+      <span id="lockText"></span>
+    </div>
+    <div class="retention" id="retentionNote" hidden></div>
+    <div id="msgs" class="msgs"></div>
+  </main>
+
+  <div class="frozen-bar" id="frozenBar" hidden>This room is frozen — only moderators can post right now.</div>
+
+  <footer class="composer">
+    <textarea id="input" rows="1" autocomplete="off" autocapitalize="sentences" enterkeyhint="send" placeholder="Message — encrypted on this device"></textarea>
+    <button class="send" id="sendBtn" type="button" aria-label="Send" disabled>
+      <svg viewBox="0 0 24 24"><path d="M3 20.5 21 12 3 3.5v6.6l11 1.9-11 1.9z"/></svg>
+    </button>
+  </footer>
 </div>
 
-<main class="log" id="log">
-  <div class="lockdivider" id="lockDivider" hidden>
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
-    <span id="lockText"></span>
+<!-- ---------- rooms rail ---------- -->
+<div class="rail-scrim" id="railScrim" hidden></div>
+<aside class="rail" id="railPanel" hidden aria-label="Rooms">
+  <div class="rail-head">
+    <span id="railWho">…</span>
   </div>
-  <div class="retention" id="retentionNote" hidden></div>
-  <div id="msgs" class="msgs"></div>
-</main>
-<footer class="composer">
-  <textarea id="input" rows="1" autocomplete="off" autocapitalize="sentences" enterkeyhint="send"
-            placeholder="Message — encrypted on this device"></textarea>
-  <button class="send" id="sendBtn" type="button" aria-label="Send" disabled>
-    <svg viewBox="0 0 24 24"><path d="M3 20.5 21 12 3 3.5v6.6l11 1.9-11 1.9z"/></svg>
-  </button>
-</footer>
+  <div class="rail-actions">
+    <button class="btn primary wide" id="btnNewRoom" type="button">New room</button>
+    <p class="hint" id="newRoomHint" hidden>New rooms are switched off by the admin right now.</p>
+  </div>
+  <ul class="room-list" id="roomList"></ul>
+  <p class="hint rail-note" id="railRoleNote"></p>
+  <nav class="rail-foot">
+    <button class="rail-link" id="btnKeySheet" type="button">Your key</button>
+    <button class="rail-link" id="btnAccountSheet" type="button">Account</button>
+    <button class="rail-link" id="btnAdminSheet" type="button" hidden>Moderation &amp; admin</button>
+    <button class="rail-link" id="btnClaimSheet" type="button" hidden>Claim admin</button>
+    <button class="rail-link danger" id="btnSignOut" type="button">Sign out</button>
+  </nav>
+</aside>
 
+<!-- ---------- sheets ---------- -->
 <div class="scrim" id="scrim" hidden></div>
 
-<section class="sheet" id="sheet" hidden aria-label="My key">
+<section class="sheet" id="keySheet" hidden aria-label="Your key">
   <div class="grip" aria-hidden="true"></div>
-  <h2>Your key</h2>
-  <div class="kv">
-    <div class="k">Handle</div>
-    <div class="v"><input id="handleInput" maxlength="24" spellcheck="false"> <button class="btn sm" id="saveHandle" type="button">Save</button></div>
-  </div>
-  <div class="kv">
-    <div class="k">Fingerprint</div>
-    <div class="v mono" id="fpFull">—</div>
-  </div>
-  <div class="kv">
-    <div class="k">Key created</div>
-    <div class="v" id="createdAt">—</div>
-  </div>
-  <div class="kv">
-    <div class="k">Algorithm</div>
-    <div class="v" id="algoTxt">—</div>
-  </div>
+  <div class="sheet-head"><h2>Your key</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <div class="kv"><div class="k">Handle</div>
+    <div class="v"><input id="handleInput" class="input inline" maxlength="24" spellcheck="false"> <button class="btn sm" id="saveHandle" type="button">Save</button></div>
+    <p class="hint" id="handleHint"></p></div>
+  <div class="kv"><div class="k">Fingerprint</div><div class="v mono" id="fpFull">—</div></div>
+  <div class="kv"><div class="k">Key created</div><div class="v" id="createdAt">—</div></div>
+  <div class="kv"><div class="k">Algorithm</div><div class="v" id="algoTxt">—</div></div>
   <div class="actions">
     <button class="btn" id="copyFp" type="button">Copy fingerprint</button>
-    <button class="btn" id="backupKey" type="button">Download key backup</button>
+    <button class="btn" id="backupKey" type="button">Download backup</button>
     <label class="btn file" for="restoreKey">Restore from backup</label>
     <input type="file" id="restoreKey" accept=".asc,.txt,.key" hidden>
   </div>
-  <p class="note">Your private key is generated in this browser and never sent to the server. The server stores ciphertext it cannot read. Messages are deleted automatically once they age out of the retention window. Lose this device <em>and</em> the backup file, and your messages are gone for good.</p>
+  <label class="toggle-row" id="syncRow" hidden>
+    <input type="checkbox" id="syncToggle">
+    <span class="toggle-text">
+      <span class="toggle-label">Sync this key to my account</span>
+      <span class="hint">Lets a new device unlock your key with your password. Stored as an envelope this server cannot open.</span>
+    </span>
+  </label>
+  <p class="note">Your private key is made in this browser and never leaves it in the clear. Lose this device and the backup file and your messages are gone for good — that is the point of end-to-end.</p>
+</section>
+
+<section class="sheet" id="accountSheet" hidden aria-label="Account">
+  <div class="grip" aria-hidden="true"></div>
+  <div class="sheet-head"><h2>Account</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <div class="kv"><div class="k">Change password</div>
+    <div class="v">
+      <input class="input" id="pwCurrent" type="password" autocomplete="current-password" placeholder="current password">
+      <input class="input" id="pwNext" type="password" autocomplete="new-password" placeholder="new password">
+      <button class="btn primary" id="btnChangePw" type="button">Update password</button>
+    </div>
+    <p class="hint">Changing it signs out your other devices. If key sync is on, the envelope is re-wrapped with the new password.</p>
+  </div>
+  <p class="note">Signing out ends this session only. Your key stays on this device so your history keeps working.</p>
+</section>
+
+<section class="sheet" id="roomSheet" hidden aria-label="Room settings">
+  <div class="grip" aria-hidden="true"></div>
+  <div class="sheet-head"><h2 id="rsName">Room</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <p class="note" id="rsAbout"></p>
+  <p class="meta-line" id="rsMeta"></p>
+
+  <div class="block">
+    <h3>Controls</h3>
+    <label class="toggle-row"><input type="checkbox" id="rsFrozen"><span class="toggle-text"><span class="toggle-label">Frozen</span><span class="hint">Members can read, only mods and the owner can post.</span></span></label>
+    <div class="row-actions"><button class="btn sm" id="rsFreeze" type="button">Apply freeze</button></div>
+    <label class="toggle-row"><input type="checkbox" id="rsPrivate"><span class="toggle-text"><span class="toggle-label">Private</span><span class="hint">Hidden from the list; joining needs approval.</span></span></label>
+    <p class="hint" id="rsPrivateHint" hidden>The public room always stays public.</p>
+    <div class="row-actions"><button class="btn sm" id="rsPrivacy" type="button">Apply privacy</button></div>
+    <label class="toggle-row"><input type="checkbox" id="rsGuestOk"><span class="toggle-text"><span class="toggle-label">Guests welcome</span><span class="hint">Anonymous visitors may read and post here.</span></span></label>
+    <div class="row-actions"><button class="btn sm" id="rsGuests" type="button">Apply guest access</button></div>
+    <label class="toggle-row"><input type="checkbox" id="rsAllowFiles"><span class="toggle-text"><span class="toggle-label">Pictures and files</span><span class="hint" id="rsFilesHint"></span></span></label>
+    <div class="row-actions"><button class="btn sm" id="rsFiles" type="button">Apply file setting</button>
+      <button class="btn sm" id="rsRename" type="button">Rename room</button></div>
+  </div>
+
+  <div class="block" id="rsPendingWrap" hidden>
+    <h3>Waiting to join</h3>
+    <div id="rsPending"></div>
+  </div>
+
+  <div class="block" id="rsMembersWrap" hidden>
+    <h3>Members</h3>
+    <div id="rsMembers"></div>
+    <p class="hint" id="rsMembersHint" hidden>Only the owner, room mods and staff can manage members.</p>
+  </div>
+
+  <div class="block" id="rsLeaveWrap">
+    <button class="btn wide" id="rsLeave" type="button">Leave this room</button>
+  </div>
+  <div class="block" id="rsDeleteWrap" hidden>
+    <button class="btn danger wide" id="rsDelete" type="button">Delete this room</button>
+  </div>
+</section>
+
+<section class="sheet" id="adminSheet" hidden aria-label="Moderation and admin">
+  <div class="grip" aria-hidden="true"></div>
+  <div class="sheet-head"><h2>Moderation &amp; admin</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <div id="adminBody"></div>
+</section>
+
+<section class="sheet" id="claimSheet" hidden aria-label="Claim admin">
+  <div class="grip" aria-hidden="true"></div>
+  <div class="sheet-head"><h2>Claim admin</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <p class="note" id="claimNote"></p>
+  <label class="field"><span class="field-label">One-time code</span>
+    <input class="input mono" id="claimCode" spellcheck="false" autocapitalize="characters" placeholder="XXXXXXXX"></label>
+  <button class="btn primary wide" id="claimBtn" type="button">Make this account the admin</button>
+</section>
+
+<section class="sheet" id="newRoomSheet" hidden aria-label="New room">
+  <div class="grip" aria-hidden="true"></div>
+  <div class="sheet-head"><h2>New room</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <label class="field"><span class="field-label">Name</span>
+    <input class="input" id="nrName" placeholder="Garage, Ops, Fishing trip…"></label>
+  <label class="field"><span class="field-label">About</span>
+    <input class="input" id="nrAbout" placeholder="optional"></label>
+  <label class="toggle-row"><input type="checkbox" id="nrPrivate"><span class="toggle-text"><span class="toggle-label">Private room</span><span class="hint">Hidden from non-members; you approve who gets in.</span></span></label>
+  <label class="toggle-row"><input type="checkbox" id="nrGuest"><span class="toggle-text"><span class="toggle-label">Guests welcome</span><span class="hint">Let anonymous visitors read and post.</span></span></label>
+  <button class="btn primary wide" id="btnCreateRoom" type="button">Create room</button>
+</section>
+
+<section class="sheet" id="dialogSheet" hidden aria-label="Confirm">
+  <div class="grip" aria-hidden="true"></div>
+  <div class="sheet-head"><h2 id="dialogTitle">Confirm</h2></div>
+  <p class="note" id="dialogBody" hidden></p>
+  <div id="dialogFields"></div>
+  <div class="row-actions">
+    <button class="btn" id="dialogCancel" type="button">Cancel</button>
+    <button class="btn primary" id="dialogConfirm" type="button">Confirm</button>
+  </div>
 </section>
 
 <div class="toast" id="toast" hidden></div>
 
 <script src="/vendor/openpgp.min.js?v=1"></script>
-<script src="/app.js?v=5"></script>
+<script src="/identity.js?v=2"></script>
+<script src="/app.js?v=7"></script>
 </body>
 </html>

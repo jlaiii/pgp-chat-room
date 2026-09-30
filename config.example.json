@@ -11,10 +11,15 @@
   "maxRecipients": 300,
   "maxKeyBytes": 8192,
   "historyLimit": 400,
+  "auth": {
+    "scryptN": 16384
+  },
   "rate": {
     "msgsPerMin": 25,
     "keysPerMin": 8,
-    "connsPerMin": 40
+    "connsPerMin": 40,
+    "authPerMin": 10,
+    "guestPerMin": 10
   },
   "publicUrl": "https://chat.example.com/"
 }
