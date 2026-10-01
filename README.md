@@ -38,6 +38,12 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
 - **The message lifetime is a setting, not a rebuild.** An admin picks 1 hour … 30 days, or *keep
   until cleared by hand*. Shortening the window sweeps the relay the moment it is applied, and
   attachments follow the same window as the messages that point at them.
+- **Your own messages are yours — until the admin says otherwise.** Delete your own message and
+  its ciphertext is shredded on the relay that instant; what stays in the timeline is a tombstone
+  that says something was there. Edit your own message and the new ciphertext replaces the old one
+  (the superseded one is shredded too). Two switches in *Settings → Messages* decide whether people
+  may delete and edit at all. Staff can always delete for moderation — nobody can ever rewrite
+  another account's words, because the relay cannot re-sign a ciphertext that isn't theirs.
 - **Moderation.** Ban or **temp-ban** (1h … 30 days) an account site-wide or per-room, **mute** someone
   (a timeout: they keep reading and keep their connection, they just cannot post), **ban by device
   fingerprint or IP address**, kick someone from a room, approve or deny join requests, promote room
@@ -76,6 +82,7 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | session tokens (30-day, HttpOnly cookie) | anyone's private key |
 | room names, membership, room mods, join requests | the contents of the sync envelope |
 | bans (target, scope, expiry, reason) | attachments (they are encrypted client-side) |
+| tombstone rows for deleted messages: who, when, who deleted it | the ciphertext of a deleted or edited message — both are shredded |
 | attachment blobs: how many bytes, in which room, uploaded when, by whom | what any file *is* — no name, no type, no content |
 | the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
 | the site notice text and which admins wear the rainbow badge | |
@@ -127,7 +134,7 @@ use, and an empty relay clears it at the first signup because the seat is alread
 | **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban, and the rainbow-name toggle — plus every live session with a one-click revoke and an accounts export |
 | **Rooms** | rename/about, **slow mode**, freeze, guest access, **attachments on/off**, take ownership, clear everyone out, clear stored ciphertext now, delete |
 | **Bans** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
-| **Settings** | allow new rooms, guests, signups; **pictures / video / other files**; the **message lifetime**; the site notice; announcements; and **lockdown** |
+| **Settings** | allow new rooms, guests, signups; **pictures / video / other files**; **who may delete and edit a message**; the **message lifetime**; the site notice; announcements; and **lockdown** |
 
 **Attachments** are switched on twice, on purpose: the site switch says which *kinds* may be sent at
 all, and each room says whether it accepts them. Neither is on by default. A file is encrypted with a
@@ -200,7 +207,9 @@ claim code, lockdown closes the doors, slow mode throttles one identity but not 
 are never stored as messages, account deletion hands over the rooms, an admin can burn a room's
 ciphertext on the spot, attachments stay off until both switches are on and round-trip byte for byte,
 a mute blocks posting without ending the session, a password reset and a single-session revoke both
-stick, and the message lifetime is policy. CI runs it on every push.
+stick, the message lifetime is policy, deleting your own message leaves a tombstone with no
+ciphertext on disk while a stranger's is refused, editing replaces the ciphertext rather than keeping
+both, and staff can delete anyone's message but never edit one. CI runs it on every push.
 
 ## Honest limits
 

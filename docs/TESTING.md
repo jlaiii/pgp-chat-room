@@ -23,6 +23,9 @@ the spot. Attachments have their own coverage: they stay off until the site swit
 the room switch are both on, the stored bytes round-trip exactly, strangers get nothing, the size cap
 refuses an oversize body unread, a mute blocks posting without ending the session, a password reset
 and a single-session revoke both stick, and the message lifetime is policy the panel can change.
+Messages have their own: a tombstone with no ciphertext replaces a deleted row on disk, a stranger
+cannot delete or edit your message, staff can delete but never edit one, editing shreds the old
+ciphertext, and both switches gate the author while staff keep moderation.
 It leaves nothing behind — everything happens under a `mkdtemp` directory.
 
 ## Manual, two identities

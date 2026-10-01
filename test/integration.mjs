@@ -660,6 +660,99 @@ test('PGP Room relay — end to end', async t => {
     assert.equal((await api('/healthz')).body.files >= 1, true, 'healthz counts stored attachments');
   });
 
+  await t.test('messages can be deleted and edited, and the site decides who may', async () => {
+    // Two accounts with keys in the lounge: one author, one stranger, plus the mod.
+    const A = await makeKey('author');
+    const B = await makeKey('bystander');
+    const author = makeClient();
+    await author('POST', '/api/auth/register', JSON.stringify({ username: 'author', password: 'author-pass-1' }));
+    await author('POST', '/api/rooms/lounge/join');
+    await author('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: A.fp, keyId: A.keyId, handle: 'author', publicKey: A.publicKey }));
+    const bystander = makeClient();
+    await bystander('POST', '/api/auth/register', JSON.stringify({ username: 'bystander', password: 'bystander-pass-1' }));
+    await bystander('POST', '/api/rooms/lounge/join');
+
+    const conn = await connect(author.cookie());
+    conn.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: A.fp, handle: 'author' }));
+    await waitFor(conn.frames, f => f.t === 'welcome');
+
+    const seal = async (text) => openpgp.encrypt({
+      message: await openpgp.createMessage({ text }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: A.publicKey })],
+      signingKeys: A.priv,
+      format: 'armored',
+    });
+    const send = async (tmpId, text) => {
+      conn.ws.send(JSON.stringify({ t: 'send', room: 'lounge', tmpId, ct: await seal(text), recipients: [A.fp] }));
+      const frame = await waitFor(conn.frames, f => f.t === 'msg' && f.m.tmpId === tmpId);
+      return frame.m.id;
+    };
+
+    const first = await send('edit-me', 'the original wording');
+    const second = await send('delete-me', 'this one goes away');
+
+    // Deleting your own message: ciphertext gone, a tombstone stays so the timeline holds.
+    const del = await author('DELETE', `/api/rooms/lounge/messages/${second}`);
+    assert.equal(del.status, 200);
+    const tomb = await waitFor(conn.frames, f => f.t === 'msg-del' && f.id === second);
+    assert.equal(tomb.by, 'author', 'the room hears who did it');
+
+    const rowsFile = path.join(dir, 'data', 'rooms', 'lounge', 'messages');
+    const day = (await readdir(rowsFile)).sort().pop();
+    const disk = await readFile(path.join(rowsFile, day), 'utf8');
+    assert.ok(!disk.includes('this one goes away'), 'the ciphertext is not on disk any more');
+    const row = JSON.parse(disk.split('\n').filter(Boolean).find(l => JSON.parse(l).id === second));
+    assert.equal(row.deleted, true);
+    assert.equal(row.ct, null, 'a tombstone holds no ciphertext');
+    assert.ok(Array.isArray(row.recipients) && row.recipients.length, 'the recipient list survives, or nobody would learn it went');
+
+    const hist = await author('GET', `/api/rooms/lounge/history?fp=${A.fp}`);
+    const hrow = hist.body.messages.find(m => m.id === second);
+    assert.equal(hrow.deleted, true);
+    assert.equal(hrow.ct, null);
+
+    // Editing your own message replaces the ciphertext and marks it.
+    const edited = await seal('the corrected wording');
+    const edit = await author('POST', `/api/rooms/lounge/messages/${first}`, JSON.stringify({ ct: edited, recipients: [A.fp] }));
+    assert.equal(edit.status, 200);
+    assert.ok(edit.body.edited, 'the relay marks when it was edited');
+    const frame = await waitFor(conn.frames, f => f.t === 'msg-edit' && f.id === first);
+    assert.equal(frame.ct, edited, 'everyone in the room gets the new ciphertext');
+    const disk2 = await readFile(path.join(rowsFile, day), 'utf8');
+    assert.ok(!disk2.includes('the original wording'), 'the superseded ciphertext was shredded, not kept alongside');
+
+    // Somebody else's message is not yours to touch, in either direction.
+    assert.equal((await bystander('DELETE', `/api/rooms/lounge/messages/${first}`)).status, 403);
+    assert.equal((await bystander('POST', `/api/rooms/lounge/messages/${first}`, JSON.stringify({ ct: edited, recipients: [A.fp] }))).status, 403);
+    assert.equal((await bystander('DELETE', `/api/rooms/lounge/messages/${second}`)).status, 403, 'not even a message that is already deleted');
+
+    // Staff can moderate a message away, but never rewrite somebody's words.
+    const staffDel = await mod('DELETE', `/api/rooms/lounge/messages/${first}`);
+    assert.equal(staffDel.status, 200, 'a moderator can delete anyone’s message');
+    const staffEdit = await mod('POST', `/api/rooms/lounge/messages/${second}`, JSON.stringify({ ct: edited, recipients: [A.fp] }));
+    assert.equal(staffEdit.status, 403, 'nobody edits another account’s message');
+
+    // The switches: with deletion off, only staff may do it; with editing off, nobody may.
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowMsgDelete: false }));
+    const third = await send('policy-1', 'policy check');
+    assert.equal((await author('DELETE', `/api/rooms/lounge/messages/${third}`)).status, 403, 'the author is stopped when the switch is off');
+    assert.equal((await mod('DELETE', `/api/rooms/lounge/messages/${third}`)).status, 200, 'staff still moderate');
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowMsgDelete: true, allowMsgEdit: false }));
+    const fourth = await send('policy-2', 'edit policy check');
+    assert.equal((await author('POST', `/api/rooms/lounge/messages/${fourth}`, JSON.stringify({ ct: edited, recipients: [A.fp] }))).status, 403, 'editing is off');
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowMsgEdit: true }));
+
+    // A deleted message cannot be deleted or edited twice, and a stranger cannot reach it at all.
+    assert.equal((await author('DELETE', `/api/rooms/lounge/messages/${second}`)).status, 409);
+    assert.equal((await author('POST', `/api/rooms/lounge/messages/${second}`, JSON.stringify({ ct: edited }))).status, 400);
+    assert.equal((await fetch(`${BASE}/api/rooms/lounge/messages/${first}`, { method: 'DELETE' })).status, 401, 'no session, no message ops');
+    assert.equal((await author('DELETE', '/api/rooms/lounge/messages/not-a-real-id-0000')).status, 404);
+
+    const log = await admin('GET', '/api/admin/events?type=msg-delete');
+    assert.ok(log.body.events.length >= 2, 'deletions are in the activity log');
+    conn.ws.close();
+  });
+
   await t.test('a mute stops posting without ending the session', async () => {
     const M = await makeKey('muted');
     const target = makeClient();

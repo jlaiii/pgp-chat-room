@@ -48,6 +48,14 @@ Two things to be honest about:
 The CSP allows `blob:` for `img-src`/`media-src` (that is how a decrypted picture is displayed from
 memory) and nothing else: no inline script, no external origins, no `object-src`.
 
+## Deleting and editing
+
+Deleting a message shreds its ciphertext — from memory and from the day segment on disk — and leaves
+a tombstone that records who sent it, when, and who deleted it. Editing rewrites the row with the new
+ciphertext and shreds the superseded one; the relay never keeps both versions. What follows is that
+the relay does know *something* was there: a timeline that silently loses lines is worse than one that
+says a message was deleted, and the metadata was already in the retention window anyway.
+
 ## Password handling and key sync
 
 - Passwords are hashed with `node:crypto` **scrypt** (per-account salt, per-account `N`),

@@ -614,6 +614,42 @@ async function handleRequest(req, res) {
       return send(res, 201, { ok: true, room: rooms.view(rooms.get(r.room.id), actor, liveFor(r.room.id)) });
     }
 
+    // One message: edit it (the author only, and only while the site allows editing)
+    // or delete it (the author, or staff moderating). A deletion leaves a tombstone
+    // row without its ciphertext, so the timeline keeps its place.
+    const msgMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})\/messages\/([a-z0-9-]{8,64})$/);
+    if (msgMatch && (method === 'DELETE' || method === 'POST' || method === 'PATCH')) {
+      const roomId = msgMatch[1];
+      const mid = msgMatch[2];
+      const room = rooms.get(roomId);
+      if (!room) return fail(res, 404, 'no such room');
+      if (!rooms.can(actor, 'read', room)) return fail(res, 403, 'not allowed');
+      const row = chat.find(roomId, mid);
+      if (!row) return fail(res, 404, 'no such message');
+      const me = [actor.fp, actor.username ? (auth.get(actor.username) || {}).keyFp : null].filter(Boolean);
+      const mine = me.includes(row.fp);
+      // Approving is the "staff in this room" bit: owner, room mod, mod, admin.
+      const staff = rooms.can(actor, 'approve', room) || rooms.can(actor, 'delete', room);
+      const who = actor.username || actor.handle || 'someone';
+      if (method === 'DELETE') {
+        if (!mine && !staff) return fail(res, 403, 'you can only delete your own messages');
+        if (mine && !staff && settings.data.allowMsgDelete === false) return fail(res, 403, 'deleting messages is switched off right now');
+        const r = chat.removeMessage(roomId, mid, who);
+        if (r.error) return fail(res, 409, r.error);
+        event('msg-delete', { room: roomId, id: mid, author: row.handle, by: who });
+        broadcastRoom(roomId, { t: 'msg-del', room: roomId, id: mid, by: who, ts: now() });
+        return send(res, 200, { ok: true, id: mid });
+      }
+      if (!mine) return fail(res, 403, 'you can only edit your own messages');
+      if (settings.data.allowMsgEdit === false) return fail(res, 403, 'editing messages is switched off right now');
+      const b = await readJson(req);
+      const r = chat.editMessage(roomId, mid, { ct: (b || {}).ct, recipients: (b || {}).recipients, fp: me[0] });
+      if (r.error) return fail(res, 400, r.error);
+      event('msg-edit', { room: roomId, id: mid, author: row.handle, by: who });
+      broadcastRoom(roomId, { t: 'msg-edit', room: roomId, id: mid, ct: r.message.ct, edited: r.message.edited, ts: now() });
+      return send(res, 200, { ok: true, id: mid, edited: r.message.edited });
+    }
+
     const fileMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})\/files\/([a-z0-9]{8,32})$/);
     if (fileMatch) {
       const roomId = fileMatch[1];

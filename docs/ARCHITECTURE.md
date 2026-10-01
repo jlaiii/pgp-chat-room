@@ -39,7 +39,7 @@ hash never touches a message and cannot decrypt anything.
 
 ```
 data/
-├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
+├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
 ├── accounts.json                 [{username, salt, hash, scryptN, role, rainbow, createdAt, lastLogin, keyFp, syncKey}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
 ├── bans.json                     [{id, kind: account|fp|ip, target, room, until, mute, reason, by, at}]
@@ -55,6 +55,10 @@ data/
 `rainbow` and `slowMs` are cosmetic or policy fields — they never touch keys or ciphertext.
 `events.log` holds metadata only, and the one secret that ever passes through it (`admin-claim`,
 the bootstrap code) is filtered out of every API path.
+
+A deleted message keeps its row and loses its `ct`: the tombstone is what tells the people who saw
+the message that it went. An edit rewrites that row in place, and the day segment is re-shredded as
+it is replaced, so the superseded ciphertext is not left behind in the file.
 
 Attachments live beside the ciphertext they belong to and are shredded by the same sweep: a
 segment is dropped when its day ages out, a blob when its mtime does. The message that points at
@@ -98,6 +102,8 @@ record on every request, so a promotion or demotion applies to **live sockets** 
 | mute (post-block, keeps their session) | no | room owner | room mod | yes | yes |
 | ban by IP address | no | no | no | yes | no |
 | upload / download an attachment | no | yes, if the site kind switch and the room switch are on | same | yes | yes |
+| delete a message | own only | own + anyone in the room (staff) | same | yes | yes |
+| edit a message | own only | own only | own only | own only | own only |
 | slow mode (per-room floor) | no | room owner | room mod | yes | yes |
 
 Two consequences worth knowing:

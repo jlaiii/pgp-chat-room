@@ -20,6 +20,8 @@
     gear: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-1.2-8h2.4l.4 2.3 1.5.6 2-1.2 1.7 1.7-1.2 2 .6 1.5 2.3.4v2.4l-2.3.4-.6 1.5 1.2 2-1.7 1.7-2-1.2-1.5.6-.4 2.3h-2.4l-.4-2.3-1.5-.6-2 1.2L4.4 17l1.2-2-.6-1.5-2.3-.4v-2.4l2.3-.4.6-1.5-1.2-2 1.7-1.7 2 1.2 1.5-.6L10.8 2Z',
     key: 'M14 2a6 6 0 0 0-5.7 7.9L2 16.2V22h5.8l1.5-1.5v-2h2v-2h2l1.3-1.3A6 6 0 1 0 14 2Zm2.5 4.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z',
     sliders: 'M3 6h10v2H3V6Zm14 0h4v2h-4V6ZM3 16h4v2H3v-2Zm8 0h10v2H11v-2ZM11 4h2v6h-2V4Zm-4 6h2v6h-2v-6Z',
+    trash: 'M9 3h6l1 2h4v2H4V5h4l1-2Zm-3 6h12l-1 12H7L6 9Zm4 2v8h2v-8h-2Zm4 0v8h2v-8h-2Z',
+    pencil: 'M4 20h4L20 8l-4-4L4 16v4Zm2-3.2 9.6-9.6 1.6 1.6L7.6 18.4 6 18v-1.2Z',
     users: 'M16 11a4 4 0 1 0-4-4 4 4 0 0 0 4 4Zm-8 1a3 3 0 1 0-3-3 3 3 0 0 0 3 3Zm8 1c-2.7 0-8 1.3-8 4v3h16v-3c0-2.7-5.3-4-8-4Zm-8 1c-2.2 0-6 .9-6 3v3h5v-3c0-1.1.5-2.2 1.3-3-.1 0-.2 0-.3 0Z',
   };
   const svg = (path, cls) => {
@@ -197,14 +199,23 @@
       confirmBtn.textContent = confirm;
       confirmBtn.className = danger ? 'btn danger' : 'btn primary';
       openSheet(sheet);
-      const done = values => { closeSheets(); resolve(values); };
+      // Resolve BEFORE closing. Closing the sheet dispatches 'hidden', whose listener
+      // resolves null — anything resolved afterwards is dropped, which silently turned
+      // every confirmation in the app into a cancel.
+      let settled = false;
+      const finish = values => {
+        if (settled) return;
+        settled = true;
+        resolve(values);
+        closeSheets();
+      };
       confirmBtn.onclick = () => {
         const out = {};
         for (const f of fields) out[f.name] = form.querySelector(`[name="${f.name}"]`).value;
-        done(out);
+        finish(out);
       };
-      $('dialogCancel').onclick = () => done(null);
-      sheet.addEventListener('hidden', () => resolve(null), { once: true });
+      $('dialogCancel').onclick = () => finish(null);
+      sheet.addEventListener('hidden', () => finish(null), { once: true });
     });
   }
 
@@ -295,6 +306,7 @@
   function applySettings() {
     const s = state.settings || {};
     if (s.motd) banner(s.motd, 'info');
+    refreshMsgActions();
     const closed = s.allowRegistration === false;
     for (const n of document.querySelectorAll('.auth-tab')) {
       if (n.dataset.mode !== 'register') continue;
@@ -657,10 +669,54 @@
     return n;
   }
 
+  // Who may touch one message. The author's own words are theirs while the site
+  // switch is on; anyone with staff rank in this room may delete (that is moderation),
+  // but never rewrite somebody else's message — the relay cannot re-sign a ciphertext.
+  function staffHere() {
+    const r = currentRoom() || {};
+    return !!(r.canApprove || r.canDelete);
+  }
+
+  // One place that paints a bubble's body, so an edit can repaint it in place.
+  function fillBody(body, dec, roomId, edited) {
+    body.innerHTML = '';
+    body.classList.remove('locked', 'gone');
+    if (dec && (dec.text || dec.file)) {
+      if (dec.text) body.append(el('div', 'text', dec.text));
+      if (dec.file) body.append(attachmentEl(dec.file, roomId));
+      if (!dec.text && !dec.file) body.append(el('div', 'text', ''));
+    } else if (dec) {
+      body.append(el('div', 'text', ''));
+    } else {
+      body.classList.add('locked');
+      body.append(svg(ICON.lock, 'ic'), el('span', null, 'sealed to an older key'));
+    }
+    // The marker lives inside the bubble, not in the meta line: consecutive messages
+    // from one author share a head, so a head is not always there to hang it on.
+    if (edited && !body.classList.contains('locked')) body.append(el('span', 'edited', 'edited'));
+  }
+
+  function tombstone(node, by, author) {
+    node.classList.add('deleted');
+    node.classList.remove('acts-on');
+    const acts = node.querySelector('.msg-acts');
+    if (acts) acts.remove();
+    const body = node.querySelector('.body');
+    if (!body) return;
+    body.innerHTML = '';
+    body.classList.add('gone');
+    body.append(svg(ICON.trash, 'ic'));
+    body.append(el('span', null, by && by !== author ? `deleted by ${by}` : 'This message was deleted'));
+  }
+
   function messageNode(m, dec, own, tmpId) {
     const wrap = el('div', 'msg' + (own ? ' own' : ''));
     if (tmpId) wrap.dataset.tmpId = tmpId;
-    if (state.lastAuthor !== m.fp || tmpId) {
+    if (m.id) wrap.dataset.mid = m.id;
+    if (m.fp) wrap.dataset.fp = m.fp;
+    if (m.deleted) wrap.classList.add('deleted');
+    // A tombstone needs its label, so it forces a head even inside a run of messages.
+    if (state.lastAuthor !== m.fp || tmpId || m.deleted) {
       const head = el('div', 'meta');
       const who = nameEl(m.handle || m.fp.slice(0, 8), 'who');
       if (!who.classList.contains('rainbow-name')) who.style.color = colorFor(m.fp);
@@ -669,17 +725,108 @@
       wrap.append(head);
     }
     state.lastAuthor = m.fp;
+    // The body has to be in the tree before the tombstone paints into it.
     const body = el('div', 'body');
-    if (dec) {
-      if (dec.text) body.append(el('div', 'text', dec.text));
-      if (dec.file) body.append(attachmentEl(dec.file, m.room || (state.room && state.room.id)));
-      if (!dec.text && !dec.file) body.append(el('div', 'text', ''));
-    } else {
-      body.classList.add('locked');
-      body.append(svg(ICON.lock, 'ic'), el('span', null, 'sealed to an older key'));
-    }
     wrap.append(body);
+    if (m.deleted) tombstone(wrap, m.deletedBy, m.handle);
+    else fillBody(body, dec, m.room || (state.room && state.room.id), m.edited);
+    const acts = el('div', 'msg-acts');
+    if (own) {
+      const b = el('button', 'act', 'Edit');
+      b.type = 'button';
+      b.dataset.act = 'edit';
+      b.onclick = () => startEdit(wrap, m, dec);
+      acts.append(b);
+    }
+    const del = el('button', 'act danger', 'Delete');
+    del.type = 'button';
+    del.dataset.act = 'delete';
+    del.onclick = () => deleteMsg(m, wrap);
+    acts.append(del);
+    wrap.dataset.own = own ? '1' : '0';
+    wrap.append(acts);
+    refreshMsgActions(wrap);
+    // Touch has no hover: a long press reveals the row, a tap anywhere else hides it.
+    let hold = null;
+    wrap.addEventListener('touchstart', () => { hold = setTimeout(() => wrap.classList.add('acts-on'), 420); }, { passive: true });
+    for (const ev of ['touchend', 'touchmove', 'touchcancel']) {
+      wrap.addEventListener(ev, () => { clearTimeout(hold); }, { passive: true });
+    }
     return wrap;
+  }
+
+  // Policy and rank decide what is offered on each bubble, and both can change under an
+  // open tab — so this runs whenever either does, instead of only at render time.
+  function refreshMsgActions(scope) {
+    const staff = staffHere();
+    const canDel = state.settings.allowMsgDelete !== false;
+    const canEdit = state.settings.allowMsgEdit !== false;
+    const root = scope || document;
+    const wraps = scope && scope.classList.contains('msg') ? [scope] : [...root.querySelectorAll('#msgs .msg[data-mid]')];
+    for (const wrap of wraps) {
+      if (wrap.classList.contains('deleted') || wrap.dataset.mid === undefined) continue;
+      const own = wrap.dataset.own === '1';
+      const acts = wrap.querySelector('.msg-acts');
+      if (!acts) continue;
+      const eb = acts.querySelector('[data-act="edit"]');
+      const db = acts.querySelector('[data-act="delete"]');
+      if (eb) eb.hidden = !(own && canEdit);
+      if (db) db.hidden = !(own ? (canDel || staff) : staff);
+      const any = [...acts.children].some(b => !b.hidden);
+      acts.hidden = !any;
+      if (!any) wrap.classList.remove('acts-on');
+    }
+  }
+
+  function startEdit(wrap, m, dec) {
+    const body = wrap.querySelector('.body');
+    if (!body || body.dataset.editing) return;
+    body.dataset.editing = '1';
+    const back = body.innerHTML;
+    body.innerHTML = '';
+    const ta = el('textarea', 'input edit-box');
+    ta.value = (dec && dec.text) || '';
+    ta.rows = 2;
+    const row = el('div', 'edit-row');
+    const save = el('button', 'btn sm primary', 'Save');
+    const cancel = el('button', 'btn sm', 'Cancel');
+    const note = el('span', 'hint', '');
+    row.append(save, cancel, note);
+    body.append(ta, row);
+    ta.focus();
+    const abort = () => { body.innerHTML = back; delete body.dataset.editing; };
+    cancel.onclick = abort;
+    ta.addEventListener('keydown', e => { if (e.key === 'Escape') abort(); });
+    save.onclick = async () => {
+      const text = ta.value.trim();
+      if (!text) { note.textContent = 'Nothing to save'; return; }
+      const payload = dec && dec.file ? JSON.stringify({ text, file: dec.file }) : text;
+      save.disabled = true;
+      note.textContent = 'sealing…';
+      try {
+        const { ct, recipients } = await encryptFor(payload);
+        await api(`/api/rooms/${state.room.id}/messages/${m.id}`, { method: 'POST', body: { ct, recipients } });
+        const nd = await decryptFrom({ ct, fp: m.fp });
+        m.edited = Date.now();
+        delete body.dataset.editing;
+        fillBody(body, nd, m.room || (state.room && state.room.id), true);
+        toast('Message edited');
+      } catch (e) {
+        save.disabled = false;
+        note.textContent = e.message;
+      }
+    };
+  }
+
+  async function deleteMsg(m, wrap) {
+    const ok = await dialog({ title: 'Delete this message?', body: 'Its ciphertext is shredded on the relay right now. Everyone sees that something was there.', confirm: 'Delete', danger: true });
+    if (!ok) return;
+    try {
+      await api(`/api/rooms/${state.room.id}/messages/${m.id}`, { method: 'DELETE' });
+      m.deleted = true;
+      tombstone(wrap, state.me.handle, m.handle);
+      toast('Message deleted');
+    } catch (e) { toast(e.message, 4200); }
   }
 
   function renderMessage(m, dec, own, tmpId) {
@@ -731,11 +878,11 @@
 
   async function loadHistory() {
     const h = await api(`/api/rooms/${state.room.id}/history?fp=${state.id.fp}`);
-    state.ttlMs = h.retentionHours * 3600000;
+    state.ttlMs = ttlFrom(h.retentionHours);
     setRetentionNote();
     renderLocked(h.lockedCount);
     for (const m of h.messages) {
-      const dec = await decryptFrom(m);
+      const dec = m.deleted ? null : await decryptFrom(m);
       renderMessage(m, dec, m.fp === state.id.fp);
     }
     scrollBottom(true);
@@ -804,6 +951,19 @@
       scrollBottom(sticky);
       return;
     }
+    if (m.t === 'msg-del') {
+      const node = document.querySelector(`#msgs [data-mid="${m.id}"]`);
+      if (node) tombstone(node, m.by, (node.querySelector('.who') || {}).textContent || null);
+      return;
+    }
+    if (m.t === 'msg-edit') {
+      const node = document.querySelector(`#msgs [data-mid="${m.id}"]`);
+      if (!node) return;
+      const dec = await decryptFrom({ ct: m.ct, fp: node.dataset.fp });
+      const body = node.querySelector('.body');
+      if (body && dec) fillBody(body, dec, state.room && state.room.id, true);
+      return;
+    }
     if (m.t === 'sys') { addSys(m.text, m.ts || Date.now(), m.notice); scrollBottom(); return; }
     if (m.t === 'presence') { state.online = m.online || []; renderPresence(); return; }
     if (m.t === 'flair') {
@@ -827,10 +987,17 @@
       $('roomName').textContent = m.room.name;
       setRoomBar();
       renderRooms();
+      refreshMsgActions();
       return;
     }
     if (m.t === 'err') { toast(m.msg, 3600); if (m.kind === 'info') refreshRooms(); return; }
-    if (m.t === 'kick') { banner(m.reason || 'removed', 'err'); refreshRooms(); return; }
+    if (m.t === 'kick') {
+      // Being moved out because the room itself was deleted needs no alarm: the client
+      // lands in another room, and the banner would sit over it saying "room closed".
+      if (m.reason !== 'room closed') banner(m.reason || 'removed', 'err');
+      refreshRooms();
+      return;
+    }
   }
 
   /* ---------------- composer ---------------- */
@@ -1547,8 +1714,13 @@
         del.onclick = async () => {
           const ok = await dialog({ title: `Delete “${r.name}”?`, body: 'Its key pool and every ciphertext row in it are shredded for good.', confirm: 'Delete', danger: true });
           if (!ok) return;
-          try { await api(`/api/rooms/${r.id}`, { method: 'DELETE' }); await refreshAdmin(); toast('Room deleted'); }
-          catch (e) { toast(e.message, 4200); }
+          try {
+            const wasCurrent = state.room && state.room.id === r.id;
+            await api(`/api/rooms/${r.id}`, { method: 'DELETE' });
+            toast('Room deleted');
+            if (wasCurrent) { closeSheets(); await refreshRooms(); const next = state.rooms[0]; if (next) await enterRoom(next.id); }
+            else await refreshAdmin();
+          } catch (e) { toast(e.message, 4200); }
         };
         actions.append(del);
       }
@@ -1662,6 +1834,16 @@
       mkToggle('Other files', 'allowFiles', 'Documents, archives, audio — anything that is not an image or video.'),
     );
     body.append(policy);
+
+    // What people may do to a message they already sent. Deleting is moderation too,
+    // so staff keep it either way; editing is always the author's own words only.
+    const msgs = el('section', 'block');
+    msgs.append(el('h3', null, 'Messages'));
+    msgs.append(
+      mkToggle('Let people delete their own messages', 'allowMsgDelete', 'Off = only staff can delete. A deleted message leaves a “deleted” mark where it was.'),
+      mkToggle('Let people edit their own messages', 'allowMsgEdit', 'Off = sent messages are final for everyone. Nobody but the author can rewrite a message, ever.'),
+    );
+    body.append(msgs);
 
     // How long ciphertext (and the attachments that belong to it) lives. Shortening the
     // window deletes immediately; "keep" leaves it until somebody clears it by hand.
@@ -1979,6 +2161,12 @@
     });
     $('sendBtn').onclick = sendCurrent;
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheets(); });
+    // Tapping anywhere but the bubble puts a revealed action row away again.
+    document.addEventListener('touchstart', e => {
+      for (const n of document.querySelectorAll('#msgs .msg.acts-on')) {
+        if (!n.contains(e.target)) n.classList.remove('acts-on');
+      }
+    }, { passive: true });
     window.addEventListener('online', () => { if (state.me && state.room) connect(); });
   }
 

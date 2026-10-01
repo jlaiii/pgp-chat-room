@@ -41,6 +41,8 @@ map of which handles render with the animated name — a rendering hint, never a
 | GET | `/api/rooms/<id>/history?fp=&limit=` | rows that fingerprint is a recipient of, plus `lockedCount` |
 | POST | `/api/rooms/<id>/files` | raw ciphertext body + `X-Content-Kind: image\|video\|file`. 201 `{id,size}`. 403 unless the site switch for that kind **and** the room's `allowFiles` are on; 413 over `maxFileBytes` (refused before the body is read) |
 | GET | `/api/rooms/<id>/files/<fileId>` | the sealed blob back, `application/octet-stream`, `no-store`, for anyone who may read the room. 404 once retention has shredded it |
+| DELETE | `/api/rooms/<id>/messages/<mid>` | shreds that message's ciphertext and leaves a tombstone. The author, or staff moderating; 403 when the site switch is off and you are not staff |
+| POST | `/api/rooms/<id>/messages/<mid>` | `{ct, recipients}` — replaces the ciphertext of your own message and marks it edited. Authors only, and only while the site switch is on |
 
 Legacy single-room endpoints `/api/keys`, `/api/pool` and `/api/history` still work and resolve to
 the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
@@ -118,6 +120,13 @@ guest sessions, 240 API calls. Ciphertext is capped at `maxMsgBytes` (128 KB def
   inside the OpenPGP envelope, so the relay can serve the blob without ever being able to open it.
 - **`blob:` URLs need the CSP to allow them.** `img-src`/`media-src` must include `blob:`, or
   decrypted pictures and video render as a broken image even though the bytes arrived.
+- **Deleting keeps a tombstone row** (`{…, ct: null, deleted: true, deletedBy, deletedAt}`) and
+  **editing replaces `ct` in place** — the day segment is rewritten with the same shred-then-swap
+  dance retention uses, so the superseded ciphertext does not survive in the file. Keep `recipients`
+  on a tombstone: history filters rows by it, so dropping it would hide the deletion from exactly the
+  people who saw the message.
+- **A `msg`/`msg-edit` frame never carries `recipients`**, and neither does history. The client
+  attempts decryption and treats failure as sealed; the relay only needs the list for routing.
 - `[hidden]` must stay `display:none !important` in the stylesheet, or dismissed banners,
   dividers and sheets stay visible.
 - A `403` may carry `{banned: true}` — the UI shows the ban reason instead of a generic failure.
