@@ -7,7 +7,7 @@
 <meta name="description" content="End-to-end encrypted chat rooms. The server stores ciphertext it cannot read.">
 <title>PGP Room</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236c8cff' d='M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=6">
+<link rel="stylesheet" href="/style.css?v=7">
 </head>
 <body>
 
@@ -89,6 +89,8 @@
     </button>
   </div>
 
+  <div class="presence" id="presence" hidden></div>
+
   <main class="log" id="log">
     <div class="lockdivider" id="lockDivider" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z"/></svg>
@@ -169,6 +171,15 @@
     <p class="hint">Changing it signs out your other devices. If key sync is on, the envelope is re-wrapped with the new password.</p>
   </div>
   <p class="note">Signing out ends this session only. Your key stays on this device so your history keeps working.</p>
+  <div class="block" id="flairWrap" hidden>
+    <h3>Flair</h3>
+    <label class="toggle-row"><input type="checkbox" id="flairRainbow">
+      <span class="toggle-text">
+        <span class="toggle-label">Rainbow name</span>
+        <span class="hint">Your display name carries an animated colour sweep, left to right, for everyone in the room. Cosmetic only — nothing about your key or your messages changes.</span>
+      </span>
+    </label>
+  </div>
 </section>
 
 <section class="sheet" id="roomSheet" hidden aria-label="Room settings">
@@ -213,6 +224,7 @@
 <section class="sheet" id="adminSheet" hidden aria-label="Moderation and admin">
   <div class="grip" aria-hidden="true"></div>
   <div class="sheet-head"><h2>Moderation &amp; admin</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
+  <div class="tabs" id="adminTabs" role="tablist"></div>
   <div id="adminBody"></div>
 </section>
 
@@ -252,6 +264,6 @@
 
 <script src="/vendor/openpgp.min.js?v=1"></script>
 <script src="/identity.js?v=2"></script>
-<script src="/app.js?v=7"></script>
+<script src="/app.js?v=9"></script>
 </body>
 </html>

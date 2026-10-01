@@ -29,9 +29,11 @@ DATA_DIR = os.environ.get("PGPCHAT_DATA_DIR", "data")
 EVENT_FILE = os.path.join(DATA_DIR, "events.log")
 OFFSET_FILE = os.environ.get("PGPCHAT_TG_OFFSET", os.path.join(DATA_DIR, ".notify-offset"))
 ROOM_URL = os.environ.get("PGPCHAT_ROOM_URL", "")
-NOTIFY_TYPES = {"join", "leave", "evict", "ban", "unban", "room-create", "room-delete",
-                "member-op", "role", "settings", "admin-claimed", "login-failed"}
-PRESENCE_TYPES = {"join", "leave", "evict"}
+NOTIFY_TYPES = {"ban", "unban", "room-create", "room-delete", "member-op", "role", "settings",
+                "admin-claimed", "login-failed", "lockdown", "account-op"}
+# Presence is not sent to Telegram: the relay's admin log carries joins and leaves,
+# filterable and on demand. This set stays empty on purpose.
+PRESENCE_TYPES = set()
 MAX_EVENT_BYTES = 5 * 1024 * 1024
 
 

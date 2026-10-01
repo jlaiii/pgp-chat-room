@@ -36,8 +36,10 @@
   const state = {
     id: null, me: null, rooms: [], room: null, pool: [], poolKeys: new Map(),
     msgs: [], online: [], ws: null, wsRetry: 0, canPost: false, frozen: false,
-    settings: { allowNewRooms: true, guestAccess: true }, claimable: false, ttlMs: 48 * 3600e3,
+    settings: { allowNewRooms: true, guestAccess: true, allowRegistration: true, motd: '' },
+    claimable: false, ttlMs: 48 * 3600e3,
     lastAuthor: null, authMode: 'login',
+    flair: {}, adminTab: 'overview', adminData: null, activity: [], activityHasMore: false, eventFilter: '',
   };
 
   const RANK = { guest: 0, user: 1, mod: 2, admin: 3 };
@@ -54,6 +56,41 @@
   function hueFor(fp) { let h = 0; for (let i = 0; i < 6; i++) h = (h * 31 + parseInt(fp.slice(i * 2, i * 2 + 2), 16)) % 360; return h; }
   const colorFor = fp => `hsl(${hueFor(fp)} 62% 66%)`;
   const fpGroups = fp => (String(fp).match(/.{1,4}/g) || []).join(' ');
+
+  // ---- display names ---------------------------------------------------------
+  // A name renders as plain text unless its account carries the rainbow flair. With
+  // flair on, every letter is its own element with its own hue and its own phase in
+  // the wave — the per-letter animation delay runs left to right, so the fade
+  // travels across the name instead of blinking as a block.
+  const rainbowOn = handle => !!state.flair[String(handle || '').toLowerCase()];
+  function nameEl(handle, cls) {
+    const text = String(handle || '');
+    const node = el('span', cls || null);
+    node.dataset.name = text.toLowerCase();
+    if (!rainbowOn(text)) { node.textContent = text; return node; }
+    node.classList.add('rainbow-name');
+    const n = Math.max(1, text.length);
+    for (let i = 0; i < text.length; i++) {
+      const ch = el('i', null, text[i]);
+      ch.style.setProperty('--ri', String(i));
+      ch.style.setProperty('--rh', String(Math.round((i / n) * 360)));
+      node.append(ch);
+    }
+    return node;
+  }
+
+  // Flair can change while a room is open: swap every node that shows that name.
+  function rerenderNames(username) {
+    const name = String(username || '').toLowerCase();
+    for (const old of [...document.querySelectorAll(`[data-name="${name}"]`)]) {
+      const keep = old.className.replace('rainbow-name', '').trim();
+      const fresh = nameEl(name, keep || null);
+      if (old.dataset.color && !fresh.classList.contains('rainbow-name')) fresh.style.color = old.dataset.color;
+      if (old.dataset.color) fresh.dataset.color = old.dataset.color;
+      old.replaceWith(fresh);
+    }
+    renderPresence();
+  }
   function relTime(t) {
     const s = Math.round((Date.now() - t) / 1000);
     if (s < 45) return 'now';
@@ -179,6 +216,9 @@
     if (state.authMode === 'guest' && state.settings.guestAccess === false) {
       $('authNote').textContent = 'Guest access is off right now — sign in or create an account.';
     }
+    if (state.authMode === 'register' && state.settings.allowRegistration === false) {
+      $('authNote').textContent = 'Signups are closed right now.';
+    }
   }
   const showApp = () => { $('authScreen').hidden = true; $('appScreen').hidden = false; };
 
@@ -188,6 +228,7 @@
     state.rooms = meResp.rooms;
     state.settings = meResp.settings;
     state.claimable = meResp.claimable;
+    state.flair = meResp.flair || {};
     state.ttlMs = meResp.retentionHours * 3600000;
     return meResp;
   }
@@ -198,6 +239,7 @@
     setRetentionNote();
     renderMe();
     renderRooms();
+    applySettings();
     const wanted = Identity.pref('room') || 'lounge';
     const target = state.rooms.find(r => r.id === wanted) || state.rooms.find(r => r.id === 'lounge') || state.rooms[0];
     if (target) await enterRoom(target.id);
@@ -216,6 +258,7 @@
     state.me = meResp.me;
     state.settings = meResp.settings;
     state.claimable = meResp.claimable;
+    state.flair = meResp.flair || {};
     state.ttlMs = meResp.retentionHours * 3600000;
     state.rooms = meResp.rooms;
 
@@ -232,9 +275,27 @@
     setRetentionNote();
     renderMe();
     renderRooms();
+    applySettings();
     const wanted = Identity.pref('room') || 'lounge';
     const target = state.rooms.find(r => r.id === wanted) || state.rooms.find(r => r.id === 'lounge') || state.rooms[0];
     if (target) await enterRoom(target.id);
+  }
+
+  // Relay policy that every client should follow live: the notice board and whether
+  // signups are open.
+  function applySettings() {
+    const s = state.settings || {};
+    if (s.motd) banner(s.motd, 'info');
+    const closed = s.allowRegistration === false;
+    for (const n of document.querySelectorAll('.auth-tab')) {
+      if (n.dataset.mode !== 'register') continue;
+      n.disabled = closed;
+      n.classList.toggle('off', closed);
+    }
+    $('btnRegister').disabled = closed;
+    $('regUser').disabled = closed;
+    $('regPass').disabled = closed;
+    if (closed && state.authMode === 'register') $('authNote').textContent = 'Signups are closed right now.';
   }
 
   async function promptUnlock() {
@@ -262,16 +323,25 @@
 
   function renderMe() {
     if (!state.me) return;
-    $('meHandle').textContent = state.me.handle;
+    const mh = $('meHandle');
+    mh.innerHTML = '';
+    mh.append(nameEl(state.me.handle, null));
     const chip = $('roleChip');
     chip.textContent = roleChipText(state.me.role);
     chip.dataset.role = state.me.role;
     $('meSwatch').style.background = state.id ? colorFor(state.id.fp) : 'var(--mut)';
-    $('railWho').textContent = state.me.kind === 'guest' ? `${state.me.handle} — guest` : `${state.me.username} — ${roleChipText(state.me.role)}`;
+    const rw = $('railWho');
+    rw.innerHTML = '';
+    rw.append(nameEl(state.me.kind === 'guest' ? state.me.handle : state.me.username, null));
+    rw.append(document.createTextNode(state.me.kind === 'guest' ? ' — guest' : ` — ${roleChipText(state.me.role)}`));
     $('btnAdminSheet').hidden = rank(state.me.role) < RANK.mod;
     $('btnClaimSheet').hidden = !(state.claimable && state.me.kind === 'account');
     $('syncRow').hidden = state.me.kind !== 'account';
     $('syncToggle').checked = !!state.me.syncKey;
+    // Flair is an admin badge: only an admin sees the switch, and it mirrors the
+    // account record rather than anything stored on this device.
+    $('flairWrap').hidden = rank(state.me.role) < RANK.admin;
+    $('flairRainbow').checked = !!state.me.rainbow;
     $('railRoleNote').textContent = state.me.kind === 'guest'
       ? 'Guests can post in public rooms. Create an account to make your own rooms.'
       : '';
@@ -448,8 +518,9 @@
     if (tmpId) wrap.dataset.tmpId = tmpId;
     if (state.lastAuthor !== m.fp || tmpId) {
       const head = el('div', 'meta');
-      const who = el('span', 'who', m.handle || m.fp.slice(0, 8));
-      who.style.color = colorFor(m.fp);
+      const who = nameEl(m.handle || m.fp.slice(0, 8), 'who');
+      if (!who.classList.contains('rainbow-name')) who.style.color = colorFor(m.fp);
+      who.dataset.color = colorFor(m.fp);
       head.append(who, timeEl(m.t));
       wrap.append(head);
     }
@@ -464,8 +535,8 @@
     $('msgs').append(wrap);
   }
 
-  function addSys(text, t) {
-    const n = el('div', 'sys');
+  function addSys(text, t, notice) {
+    const n = el('div', 'sys' + (notice ? ' notice' : ''));
     n.append(el('span', null, text));
     if (t) n.append(timeEl(t));
     $('msgs').append(n);
@@ -488,6 +559,21 @@
     const others = state.online.filter(o => o.fp !== (state.id && state.id.fp));
     $('onlineCount').textContent = `${state.online.length} online`;
     $('onlineCount').title = others.length ? `in this room: ${others.map(o => o.handle).join(', ')}` : '';
+    const strip = $('presence');
+    strip.innerHTML = '';
+    if (!state.online.length) { strip.hidden = true; return; }
+    strip.hidden = false;
+    for (const o of state.online.slice(0, 24)) {
+      const chip = el('span', 'pc');
+      const sw = el('span', 'sw');
+      sw.style.background = colorFor(o.fp);
+      const nm = nameEl(o.handle, null);
+      if (!nm.classList.contains('rainbow-name')) nm.style.color = colorFor(o.fp);
+      nm.dataset.color = colorFor(o.fp);
+      chip.append(sw, nm);
+      strip.append(chip);
+    }
+    if (state.online.length > 24) strip.append(el('span', 'pc', `+${state.online.length - 24} more`));
   }
 
   async function loadHistory() {
@@ -558,8 +644,15 @@
       scrollBottom(sticky);
       return;
     }
-    if (m.t === 'sys') { addSys(m.text, m.ts || Date.now()); scrollBottom(); return; }
+    if (m.t === 'sys') { addSys(m.text, m.ts || Date.now(), m.notice); scrollBottom(); return; }
     if (m.t === 'presence') { state.online = m.online || []; renderPresence(); return; }
+    if (m.t === 'flair') {
+      if (m.rainbow) state.flair[m.username] = true; else delete state.flair[m.username];
+      rerenderNames(m.username);
+      return;
+    }
+    if (m.t === 'settings') { state.settings = m.settings || state.settings; applySettings(); return; }
+    if (m.t === 'evt') { onEvent(m.e); return; }
     if (m.t === 'key:add') { await addPoolKey(m.key); toast(`${m.key.handle} can now read new messages`); return; }
     if (m.t === 'room') {
       state.room = m.room;
@@ -593,8 +686,9 @@
     const wrap = el('div', 'msg own');
     wrap.dataset.tmpId = tmpId;
     const head = el('div', 'meta');
-    const who = el('span', 'who', state.me.handle);
-    who.style.color = colorFor(state.id.fp);
+    const who = nameEl(state.me.handle, 'who');
+    if (!who.classList.contains('rainbow-name')) who.style.color = colorFor(state.id.fp);
+    who.dataset.color = colorFor(state.id.fp);
     head.append(who, timeEl(Date.now()));
     wrap.append(head, el('div', 'body', text));
     $('msgs').append(wrap);
@@ -768,9 +862,44 @@
 
   /* ---------------- admin sheet ---------------- */
 
+  const ADMIN_TABS = [
+    ['overview', 'Overview'], ['activity', 'Activity'], ['people', 'People'],
+    ['rooms', 'Rooms'], ['bans', 'Bans'], ['settings', 'Settings'],
+  ];
+  const EVENT_FILTERS = [
+    ['', 'Everything'],
+    ['join,leave,evict', 'Presence'],
+    ['register,guest,login,login-failed,password-change,sync-key,account-op,flair', 'People'],
+    ['room-create,room-update,room-delete,room-join,room-leave,member-op,room-purge,announce', 'Rooms'],
+    ['ban,unban', 'Moderation'],
+    ['settings,role,admin-claimed,lockdown', 'Admin'],
+  ];
+
   async function openAdminSheet() {
     openSheet($('adminSheet'));
+    buildAdminTabs();
     await renderAdmin();
+  }
+
+  function buildAdminTabs() {
+    const wrap = $('adminTabs');
+    if (wrap.dataset.built) { syncAdminTabs(); return; }
+    wrap.innerHTML = '';
+    for (const [id, label] of ADMIN_TABS) {
+      const b = el('button', 'tab', label);
+      b.type = 'button';
+      b.dataset.tab = id;
+      b.onclick = () => { state.adminTab = id; syncAdminTabs(); renderAdmin(); };
+      wrap.append(b);
+    }
+    wrap.dataset.built = '1';
+    syncAdminTabs();
+  }
+
+  function syncAdminTabs() {
+    const wrap = $('adminTabs');
+    if (!wrap) return;
+    for (const b of wrap.children) b.classList.toggle('on', b.dataset.tab === state.adminTab);
   }
 
   async function renderAdmin() {
@@ -778,105 +907,513 @@
     body.innerHTML = '';
     let data;
     try { data = await api('/api/admin/overview'); } catch (e) { body.append(el('p', 'note', e.message)); return; }
+    state.adminData = data;
+    state.flair = data.flair || state.flair;
+    if (state.adminTab === 'activity') return renderActivityTab(body, data);
+    if (state.adminTab === 'people') return renderPeopleTab(body, data);
+    if (state.adminTab === 'rooms') return renderRoomsTab(body, data);
+    if (state.adminTab === 'bans') return renderBansTab(body, data);
+    if (state.adminTab === 'settings') return renderSettingsTab(body, data);
+    return renderOverviewTab(body, data);
+  }
 
-    const policy = el('section', 'block');
-    policy.append(el('h3', null, 'Site settings'));
-    const mkToggle = (label, key, hintText) => {
-      const row = el('label', 'toggle-row');
-      const cb = el('input');
-      cb.type = 'checkbox';
-      cb.checked = data.settings[key] !== false;
-      cb.onchange = async () => {
-        try {
-          const res = await api('/api/admin/settings', { method: 'PATCH', body: { [key]: cb.checked } });
-          state.settings = res.settings;
-          renderRooms();
-          toast(`${label}: ${cb.checked ? 'on' : 'off'}`);
-        } catch (e) { cb.checked = !cb.checked; toast(e.message); }
-      };
-      const wrap = el('span', 'toggle-text');
-      wrap.append(el('span', 'toggle-label', label), el('span', 'hint', hintText));
-      row.append(cb, wrap);
-      return row;
+  // ---- shared bits -----------------------------------------------------------
+
+  function mkToggle(label, key, hint) {
+    const settings = (state.adminData && state.adminData.settings) || state.settings;
+    const row = el('label', 'toggle-row');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = settings[key] !== false;
+    cb.onchange = async () => {
+      try {
+        const res = await api('/api/admin/settings', { method: 'PATCH', body: { [key]: cb.checked } });
+        state.settings = res.settings;
+        if (state.adminData) state.adminData.settings = res.settings;
+        renderRooms();
+        applySettings();
+        toast(`${label}: ${cb.checked ? 'on' : 'off'}`);
+      } catch (e) { cb.checked = !cb.checked; toast(e.message, 4200); }
     };
-    policy.append(
-      mkToggle('Allow new rooms', 'allowNewRooms', 'Admins can always create rooms.'),
-      mkToggle('Allow guests', 'guestAccess', 'Guests may post in rooms that welcome them.'),
-    );
-    body.append(policy);
+    const text = el('span', 'toggle-text');
+    text.append(el('span', 'toggle-label', label), el('span', 'hint', hint));
+    row.append(cb, text);
+    return row;
+  }
 
-    const acct = el('section', 'block');
-    acct.append(el('h3', null, `Accounts (${data.accounts.length})`));
-    for (const a of data.accounts) {
-      const row = el('div', 'row');
-      const nameWrap = el('span', 'row-name');
-      nameWrap.append(el('span', null, a.username));
-      const chip = el('span', 'role-chip', roleChipText(a.role));
-      chip.dataset.role = a.role;
-      nameWrap.append(chip);
-      if (a.ban) nameWrap.append(el('span', 'ban-chip', a.ban.until ? `banned · ${fmtWhen(a.ban.until)}` : 'banned'));
-      row.append(nameWrap);
-      const sel = el('select', 'input sm');
-      for (const [v, label] of [['user', 'Member'], ['mod', 'Mod'], ['admin', 'Admin']]) { const o = el('option', null, label); o.value = v; sel.append(o); }
-      sel.value = a.role;
-      sel.onchange = async () => {
-        try { await api('/api/admin/role', { method: 'POST', body: { username: a.username, role: sel.value } }); toast(`${a.username} is now ${sel.value}`); renderAdmin(); }
-        catch (e) { toast(e.message, 4200); renderAdmin(); }
-      };
-      row.append(sel);
-      if (a.ban) {
-        const un = el('button', 'btn sm', 'Unban');
-        un.onclick = () => unban({ kind: 'account', target: a.username, room: null });
-        row.append(un);
-      } else {
-        const bn = el('button', 'btn sm', 'Ban');
-        bn.onclick = () => banUser(a.username, null);
-        row.append(bn);
-      }
-      acct.append(row);
+  function statCard(label, value) {
+    const c = el('div', 'stat');
+    c.append(el('span', 'stat-v', String(value)), el('span', 'stat-l', label));
+    return c;
+  }
+
+  function sparkline(buckets) {
+    const wrap = el('div', 'spark');
+    const max = Math.max(1, ...buckets);
+    for (const v of buckets) {
+      const bar = el('span', 'spark-bar');
+      bar.style.height = `${Math.max(4, Math.round((v / max) * 100))}%`;
+      bar.title = `${v} events`;
+      wrap.append(bar);
     }
-    body.append(acct);
+    return wrap;
+  }
+
+  // Every event type the relay writes, in one line of plain English. No message
+  // content can ever show up here: the relay has nothing readable to log.
+  function fmtEvent(e) {
+    const t = e.type;
+    if (t === 'join') return { k: 'join', s: `${e.handle} joined ${e.room} · ${e.online} online` };
+    if (t === 'leave') return { k: 'leave', s: `${e.handle} left ${e.room} · ${e.online} online` };
+    if (t === 'evict') return { k: 'leave', s: `${e.handle} rotated out of ${e.room}` };
+    if (t === 'key') return { k: 'key', s: `${e.handle} registered a key in ${e.room} (pool ${e.poolSize})` };
+    if (t === 'register') return { k: 'acct', s: `${e.username} created an account${e.role === 'admin' ? ' — seated as admin' : ''}` };
+    if (t === 'guest') return { k: 'acct', s: `${e.handle} entered as a guest` };
+    if (t === 'login') return { k: 'auth', s: `${e.username} signed in` };
+    if (t === 'login-failed') return { k: 'bad', s: `failed sign-in for “${e.username}”` };
+    if (t === 'password-change') return { k: 'auth', s: `${e.username} changed their password` };
+    if (t === 'sync-key') return { k: 'key', s: `${e.username} turned key sync ${e.enabled ? 'on' : 'off'}` };
+    if (t === 'ban') return { k: 'ban', s: `${e.by} banned ${e.target}${e.room ? ` from ${e.room}` : ' site-wide'} · ${e.hours ? `${e.hours}h` : 'permanent'}${e.reason ? ` · ${e.reason}` : ''}` };
+    if (t === 'unban') return { k: 'ban', s: `${e.by || 'staff'} lifted a ban` };
+    if (t === 'role') return { k: 'admin', s: `${e.by} made ${e.target} a ${e.role}` };
+    if (t === 'settings') return { k: 'admin', s: `${e.by} changed the site settings` };
+    if (t === 'admin-claimed') return { k: 'admin', s: `${e.username} took the admin seat` };
+    if (t === 'lockdown') return { k: 'admin', s: `${e.by} turned lockdown ${e.on ? 'on' : 'off'}` };
+    if (t === 'flair') return { k: 'me', s: `${e.username} turned the rainbow name ${e.rainbow ? 'on' : 'off'}` };
+    if (t === 'account-op') {
+      if (e.op === 'signout') return { k: 'admin', s: `${e.by} signed ${e.target} out of every device` };
+      if (e.op === 'delete') return { k: 'admin', s: `${e.by} deleted the account ${e.target}` };
+      if (e.op === 'guest-purge') return { k: 'admin', s: `${e.by} cleared ${e.sessions} guest session${e.sessions === 1 ? '' : 's'}` };
+      return { k: 'admin', s: `${e.by} ran ${e.op}` };
+    }
+    if (t === 'room-create') return { k: 'room', s: `${e.by} created the room “${e.name}”` };
+    if (t === 'room-update') return { k: 'room', s: `${e.by} ${e.what} in ${e.room}` };
+    if (t === 'room-delete') return { k: 'room', s: `${e.by} deleted the room “${e.name || e.room}”` };
+    if (t === 'room-purge') return { k: 'room', s: `${e.by} cleared ${e.rows} stored row${e.rows === 1 ? '' : 's'} in ${e.room}` };
+    if (t === 'room-join') return { k: 'room', s: `${e.who} ${e.pending ? 'asked to join' : 'joined'} ${e.room}` };
+    if (t === 'room-leave') return { k: 'room', s: `${e.who} left ${e.room}` };
+    if (t === 'member-op') return { k: 'room', s: `${e.by} ${e.op}ed ${e.target} in ${e.room}` };
+    if (t === 'announce') return { k: 'admin', s: `${e.by} announced to ${e.room === 'all' ? 'every room' : e.room}: “${e.text}”` };
+    return { k: 'other', s: t };
+  }
+
+  function eventRow(e, showIp) {
+    const f = fmtEvent(e);
+    const row = el('div', 'log-row');
+    row.append(el('span', `badge ${f.k}`, f.k));
+    const body = el('div', 'log-body');
+    body.append(el('span', 'log-text', f.s));
+    body.append(el('span', 'log-meta', `${relTime(e.t)}${showIp && e.ip ? ` · ${e.ip}` : ''}`));
+    row.append(body);
+    return row;
+  }
+
+  const matchesFilter = type => !state.eventFilter || state.eventFilter.split(',').includes(type);
+
+  // Live tail: the relay pushes every event to staff sockets, so the log is never
+  // stale and never polled.
+  function onEvent(e) {
+    if (!e || !e.type || !matchesFilter(e.type)) return;
+    state.activity.unshift(e);
+    if (state.activity.length > 400) state.activity.length = 400;
+    if (!$('adminSheet').hidden && state.adminTab === 'activity' && $('eventList')) paintEvents();
+  }
+
+  function paintEvents() {
+    const list = $('eventList');
+    if (!list) return;
+    const showIp = state.me && rank(state.me.role) >= RANK.admin;
+    list.innerHTML = '';
+    if (!state.activity.length) { list.append(el('p', 'note', 'Nothing logged for this filter yet.')); return; }
+    for (const e of state.activity) list.append(eventRow(e, showIp));
+    if (state.activityHasMore) list.append(el('p', 'hint', 'Older rows are in the download — the panel keeps the newest 250.'));
+  }
+
+  async function loadEvents() {
+    const q = `?limit=250${state.eventFilter ? `&type=${encodeURIComponent(state.eventFilter)}` : ''}`;
+    try {
+      const res = await api(`/api/admin/events${q}`);
+      state.activity = res.events || [];
+      state.activityHasMore = !!res.hasMore;
+    } catch (e) { state.activity = []; toast(e.message, 4200); }
+  }
+
+  async function refreshAdmin() {
+    await refreshRooms();
+    await renderAdmin();
+  }
+
+  async function patchRoomAdmin(roomId, patch) {
+    try { await api(`/api/rooms/${roomId}`, { method: 'PATCH', body: patch }); await refreshAdmin(); toast('Room updated'); }
+    catch (e) { toast(e.message, 4200); }
+  }
+
+  // ---- tabs ------------------------------------------------------------------
+
+  function renderOverviewTab(body, data) {
+    const now = el('section', 'block');
+    now.append(el('h3', null, 'Right now'));
+    const onlineTotal = (data.online || []).reduce((n, r) => n + r.online.length, 0);
+    const grid = el('div', 'stat-grid');
+    grid.append(
+      statCard('online', onlineTotal),
+      statCard('keys', data.stats.keys),
+      statCard('ciphertext rows', data.stats.messages),
+      statCard('accounts', data.accounts.length),
+      statCard('guest sessions', data.guestSessions),
+      statCard('live sessions', data.sessions),
+      statCard('bans', data.bans.length),
+      statCard('rooms', data.rooms.length),
+    );
+    now.append(grid);
+    if (data.lockdown) now.append(el('p', 'hint warn', 'Lockdown is on: every room is frozen, new rooms, signups and guests are stopped.'));
+    body.append(now);
+
+    const act = el('section', 'block');
+    act.append(el('h3', null, `Activity — ${data.activity.total24h} events in the last 24h`));
+    act.append(sparkline(data.activity.buckets));
+    act.append(el('p', 'hint', 'Seven days, oldest on the left.'));
+    const types = Object.entries(data.activity.byType24h || {}).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    if (types.length) {
+      const chips = el('div', 'chips');
+      for (const [t, n] of types) chips.append(el('span', 'chip', `${t} ${n}`));
+      act.append(chips);
+    }
+    body.append(act);
 
     const roomsBlock = el('section', 'block');
-    roomsBlock.append(el('h3', null, `Rooms (${data.rooms.length})`));
-    for (const r of data.rooms) {
+    roomsBlock.append(el('h3', null, `Rooms (${data.perRoom.length})`));
+    for (const r of data.perRoom) {
       const row = el('div', 'row');
-      row.append(el('span', 'row-name', `${r.name} · ${r.members.length} in · ${r.keys} keys${r.frozen ? ' · frozen' : ''}${r.private ? ' · private' : ''}`));
-      const freeze = el('button', 'btn sm', r.frozen ? 'Unfreeze' : 'Freeze');
-      freeze.onclick = async () => {
-        try { await api(`/api/rooms/${r.id}`, { method: 'PATCH', body: { frozen: !r.frozen } }); await refreshRooms(); renderAdmin(); toast(r.frozen ? 'Room unfrozen' : 'Room frozen'); }
-        catch (e) { toast(e.message, 4200); }
-      };
-      const del = el('button', 'btn sm danger', 'Delete');
-      del.onclick = async () => {
-        const ok = await dialog({ title: `Delete “${r.name}”?`, body: 'Its key pool and every ciphertext row in it are shredded for good.', confirm: 'Delete', danger: true });
-        if (!ok) return;
-        try { await api(`/api/rooms/${r.id}`, { method: 'DELETE' }); await refreshRooms(); renderAdmin(); toast('Room deleted'); }
-        catch (e) { toast(e.message, 4200); }
-      };
-      row.append(freeze, del);
+      row.append(el('span', 'row-name', `${r.name} · ${r.online} here · ${r.keys} keys · ${r.messages} rows`));
+      if (r.frozen) row.append(el('span', 'room-tag frozen', 'frozen'));
+      if (r.slowMs) row.append(el('span', 'room-tag', `slow ${Math.round(r.slowMs / 1000)}s`));
       roomsBlock.append(row);
     }
     body.append(roomsBlock);
 
-    const bans = el('section', 'block');
-    bans.append(el('h3', null, `Active bans (${data.bans.length})`));
-    if (!data.bans.length) bans.append(el('p', 'note', 'Nobody is banned.'));
-    for (const b of data.bans) {
-      const row = el('div', 'row');
-      const who = b.kind === 'account' ? b.target : `${b.target.slice(0, 12)}… (device)`;
-      row.append(el('span', 'row-name', `${who}${b.room ? ` · from ${b.room}` : ' · site-wide'} · ${b.until ? `until ${fmtWhen(b.until)}` : 'permanent'}${b.reason ? ` · ${b.reason}` : ''}`));
-      const un = el('button', 'btn sm', 'Unban');
-      un.onclick = () => unban({ id: b.id });
-      row.append(un);
-      bans.append(row);
-    }
-    body.append(bans);
+    const here = el('section', 'block');
+    here.append(el('h3', null, 'Online now'));
+    const chips = el('div', 'chips');
+    let any = false;
+    for (const r of (data.online || [])) for (const h of r.online) { any = true; chips.append(nameEl(h)); }
+    here.append(any ? chips : el('p', 'note', 'Nobody is sitting in a room right now.'));
+    body.append(here);
+  }
 
+  async function renderActivityTab(body, data) {
+    const head = el('section', 'block');
+    head.append(el('h3', null, 'Activity log'));
+    const filters = el('div', 'tabs');
+    for (const [types, label] of EVENT_FILTERS) {
+      const b = el('button', 'tab' + (state.eventFilter === types ? ' on' : ''), label);
+      b.type = 'button';
+      b.onclick = async () => { state.eventFilter = types; await loadEvents(); await renderAdmin(); };
+      filters.append(b);
+    }
+    head.append(filters);
+    head.append(el('p', 'hint', 'Live — rows appear as they happen. Only metadata is ever logged: the relay cannot read a message, so there is nothing to log.'));
+    const tools = el('div', 'row-actions');
+    const dl = el('button', 'btn sm', 'Download .jsonl');
+    dl.onclick = () => { window.location.href = `/api/admin/events/export${state.eventFilter ? `?type=${encodeURIComponent(state.eventFilter)}` : ''}`; };
+    const reload = el('button', 'btn sm', 'Reload');
+    reload.onclick = async () => { await loadEvents(); await renderAdmin(); };
+    tools.append(dl, reload);
+    head.append(tools);
+    body.append(head);
+
+    const list = el('div', 'log-list');
+    list.id = 'eventList';
+    body.append(list);
+    await loadEvents();
+    paintEvents();
     const stats = el('section', 'block');
     stats.append(el('h3', null, 'Relay'));
     stats.append(el('p', 'note', `${data.stats.messages} ciphertext rows stored · ${data.stats.keys} keys · ${data.accounts.length} accounts · ${data.sessions} live sessions · retention ${fmtWindow(data.retentionHours * 3600000)}`));
     body.append(stats);
+  }
+
+  function renderPeopleTab(body, data) {
+    const acct = el('section', 'block');
+    acct.append(el('h3', null, `Accounts (${data.accounts.length})`));
+    const me = state.me;
+    for (const a of data.accounts) {
+      const row = el('div', 'row');
+      const nameWrap = el('span', 'row-name');
+      nameWrap.append(nameEl(a.username));
+      const chip = el('span', 'role-chip', roleChipText(a.role));
+      chip.dataset.role = a.role;
+      nameWrap.append(chip);
+      if (a.ban) nameWrap.append(el('span', 'ban-chip', a.ban.until ? `banned · ${fmtWhen(a.ban.until)}` : 'banned'));
+      if (a.rainbow) nameWrap.append(el('span', 'chip', 'rainbow'));
+      if (a.sessions) nameWrap.append(el('span', 'chip', `${a.sessions} session${a.sessions === 1 ? '' : 's'}`));
+      row.append(nameWrap);
+      row.append(el('span', 'log-meta', `${a.lastLogin ? `seen ${relTime(a.lastLogin)}` : 'never signed in'}${a.keyFp ? ` · key ${a.keyFp.slice(0, 8)}` : ' · no key yet'}`));
+
+      const sel = el('select', 'input sm');
+      for (const [v, label] of [['user', 'Member'], ['mod', 'Mod'], ['admin', 'Admin']]) { const o = el('option', null, label); o.value = v; sel.append(o); }
+      sel.value = a.role;
+      sel.disabled = a.username === (me && me.username);
+      sel.onchange = async () => {
+        try { await api('/api/admin/role', { method: 'POST', body: { username: a.username, role: sel.value } }); toast(`${a.username} is now ${sel.value}`); await refreshAdmin(); }
+        catch (e) { toast(e.message, 4200); await renderAdmin(); }
+      };
+      row.append(sel);
+
+      const actions = el('div', 'row-actions');
+      if (a.role === 'admin') {
+        const rb = el('button', 'btn sm', a.rainbow ? 'Rainbow off' : 'Rainbow on');
+        rb.onclick = async () => {
+          try { await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'rainbow', rainbow: !a.rainbow } }); await renderAdmin(); toast(`${a.username}: rainbow ${a.rainbow ? 'off' : 'on'}`); }
+          catch (e) { toast(e.message, 4200); }
+        };
+        actions.append(rb);
+      }
+      if (a.username !== (me && me.username) && a.role !== 'admin') {
+        const out = el('button', 'btn sm', 'Sign out');
+        out.onclick = async () => {
+          try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'signout' } }); toast(`${a.username} signed out${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderAdmin(); }
+          catch (e) { toast(e.message, 4200); }
+        };
+        const del = el('button', 'btn sm danger', 'Delete');
+        del.onclick = async () => {
+          const ok = await dialog({ title: `Delete ${a.username}?`, body: 'The account is removed, their sessions are dropped and any room they owned passes to you. This cannot be undone.', confirm: 'Delete', danger: true });
+          if (!ok) return;
+          try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'delete' } }); toast(`${a.username} deleted${r.rooms.length ? ` · took over ${r.rooms.join(', ')}` : ''}`); await refreshAdmin(); }
+          catch (e) { toast(e.message, 4200); }
+        };
+        actions.append(out, del);
+      }
+      if (a.ban) {
+        const un = el('button', 'btn sm', 'Unban');
+        un.onclick = () => unban({ kind: 'account', target: a.username, room: null });
+        actions.append(un);
+      } else if (a.username !== (me && me.username)) {
+        const bn = el('button', 'btn sm danger', 'Ban');
+        bn.onclick = () => banUser(a.username, null);
+        actions.append(bn);
+      }
+      row.append(actions);
+      acct.append(row);
+    }
+    body.append(acct);
+  }
+
+  function renderRoomsTab(body, data) {
+    for (const r of data.rooms) {
+      const card = el('section', 'block');
+      const head = el('h3', null, r.name);
+      card.append(head);
+      card.append(el('p', 'hint', `${r.builtin ? 'the public room' : r.private ? 'private' : 'public'} · ${r.memberCount} member${r.memberCount === 1 ? '' : 's'} · ${r.keys} keys · ${r.online} online${r.frozen ? ' · frozen' : ''}`));
+
+      const aboutLabel = el('label', 'field');
+      aboutLabel.append(el('span', 'field-label', 'About'));
+      const about = el('input', 'input');
+      about.value = r.about || '';
+      about.placeholder = 'shown under the room name';
+      aboutLabel.append(about);
+      card.append(aboutLabel);
+
+      const slowLabel = el('label', 'field');
+      slowLabel.append(el('span', 'field-label', 'Slow mode'));
+      const slow = el('select', 'input sm');
+      for (const [v, l] of [['0', 'off'], ['5000', '5s between posts'], ['15000', '15s'], ['30000', '30s'], ['60000', '1 min'], ['300000', '5 min']]) { const o = el('option', null, l); o.value = v; slow.append(o); }
+      slow.value = String(r.slowMs || 0);
+      slowLabel.append(slow);
+      slowLabel.append(el('span', 'hint', 'One identity cannot post faster than this. Mods and the room staff are exempt.'));
+      card.append(slowLabel);
+
+      const save = el('button', 'btn sm primary', 'Save room');
+      save.onclick = () => patchRoomAdmin(r.id, { about: about.value, slowMs: Number(slow.value) });
+      const freeze = el('button', 'btn sm', r.frozen ? 'Unfreeze' : 'Freeze');
+      freeze.onclick = () => patchRoomAdmin(r.id, { frozen: !r.frozen });
+      const guests = el('button', 'btn sm', r.guestOk ? 'Guests off' : 'Guests on');
+      guests.onclick = () => patchRoomAdmin(r.id, { guestOk: !r.guestOk });
+      const purge = el('button', 'btn sm', 'Clear history now');
+      purge.onclick = async () => {
+        const ok = await dialog({ title: `Clear ${r.name}?`, body: 'Every stored ciphertext row for this room is shredded immediately — disk and memory, no waiting for the retention window.', confirm: 'Clear now', danger: true });
+        if (!ok) return;
+        try { const res = await api('/api/admin/purge', { method: 'POST', body: { room: r.id } }); toast(`Cleared ${res.purgedRows} row${res.purgedRows === 1 ? '' : 's'}`); await renderAdmin(); }
+        catch (e) { toast(e.message, 4200); }
+      };
+      const actions = el('div', 'row-actions');
+      actions.append(save, freeze, guests, purge);
+      if (!r.builtin) {
+        const priv = el('button', 'btn sm', r.private ? 'Make public' : 'Make private');
+        priv.onclick = () => patchRoomAdmin(r.id, { private: !r.private });
+        actions.append(priv);
+      }
+      if (r.canDelete) {
+        const del = el('button', 'btn sm danger', 'Delete room');
+        del.onclick = async () => {
+          const ok = await dialog({ title: `Delete “${r.name}”?`, body: 'Its key pool and every ciphertext row in it are shredded for good.', confirm: 'Delete', danger: true });
+          if (!ok) return;
+          try { await api(`/api/rooms/${r.id}`, { method: 'DELETE' }); await refreshAdmin(); toast('Room deleted'); }
+          catch (e) { toast(e.message, 4200); }
+        };
+        actions.append(del);
+      }
+      card.append(actions);
+      body.append(card);
+    }
+  }
+
+  function renderBansTab(body, data) {
+    const mk = el('section', 'block');
+    mk.append(el('h3', null, 'Place a ban'));
+    const kindLabel = el('label', 'field');
+    kindLabel.append(el('span', 'field-label', 'Against'));
+    const kind = el('select', 'input sm');
+    for (const [v, l] of [['account', 'an account'], ['fp', 'a device fingerprint']]) { const o = el('option', null, l); o.value = v; kind.append(o); }
+    kindLabel.append(kind);
+    mk.append(kindLabel);
+
+    const targetLabel = el('label', 'field');
+    targetLabel.append(el('span', 'field-label', 'Who'));
+    const target = el('input', 'input');
+    target.placeholder = 'username, or a 40-character fingerprint';
+    targetLabel.append(target);
+    mk.append(targetLabel);
+
+    const scopeLabel = el('label', 'field');
+    scopeLabel.append(el('span', 'field-label', 'Where'));
+    const scope = el('select', 'input sm');
+    const siteOpt = el('option', null, 'site-wide'); siteOpt.value = ''; scope.append(siteOpt);
+    for (const r of data.rooms) { const o = el('option', null, `only in ${r.name}`); o.value = r.id; scope.append(o); }
+    scopeLabel.append(scope);
+    mk.append(scopeLabel);
+
+    const hoursLabel = el('label', 'field');
+    hoursLabel.append(el('span', 'field-label', 'How long'));
+    const hours = el('select', 'input sm');
+    for (const [v, l] of [['1', '1 hour'], ['24', '24 hours'], ['168', '7 days'], ['720', '30 days'], ['', 'permanent']]) { const o = el('option', null, l); o.value = v; hours.append(o); }
+    hours.value = '24';
+    hoursLabel.append(hours);
+    mk.append(hoursLabel);
+
+    const reasonLabel = el('label', 'field');
+    reasonLabel.append(el('span', 'field-label', 'Reason (they are shown this)'));
+    const reason = el('input', 'input');
+    reason.placeholder = 'optional';
+    reasonLabel.append(reason);
+    mk.append(reasonLabel);
+
+    const go = el('button', 'btn sm danger', 'Place ban');
+    go.onclick = async () => {
+      const payload = { kind: kind.value, target: target.value.trim().toLowerCase(), room: scope.value || null, hours: hours.value === '' ? null : Number(hours.value), reason: reason.value };
+      if (!payload.target) { toast('Who should I ban?'); return; }
+      try {
+        const res = await api('/api/mod/ban', { method: 'POST', body: payload });
+        toast(`Banned · ${res.kicked} connection${res.kicked === 1 ? '' : 's'} dropped`);
+        target.value = '';
+        reason.value = '';
+        await refreshAdmin();
+      } catch (e) { toast(e.message, 4200); }
+    };
+    const mkActions = el('div', 'row-actions');
+    mkActions.append(go);
+    mk.append(mkActions);
+    body.append(mk);
+
+    const list = el('section', 'block');
+    list.append(el('h3', null, `Active bans (${data.bans.length})`));
+    if (!data.bans.length) list.append(el('p', 'note', 'Nobody is banned.'));
+    for (const b of data.bans) {
+      const row = el('div', 'row');
+      const who = b.kind === 'account' ? b.target : `${b.target.slice(0, 12)}… (device)`;
+      row.append(el('span', 'row-name', who));
+      row.append(el('span', 'log-meta', `${b.room ? `only in ${b.room}` : 'site-wide'} · ${b.until ? `until ${fmtWhen(b.until)}` : 'permanent'}${b.reason ? ` · ${b.reason}` : ''} · by ${b.by || 'system'}`));
+      const un = el('button', 'btn sm', 'Lift');
+      un.onclick = () => unban({ id: b.id });
+      row.append(un);
+      list.append(row);
+    }
+    body.append(list);
+  }
+
+  function renderSettingsTab(body, data) {
+    const policy = el('section', 'block');
+    policy.append(el('h3', null, 'Site policy'));
+    policy.append(
+      mkToggle('Allow new rooms', 'allowNewRooms', 'Admins can always create rooms.'),
+      mkToggle('Allow guests', 'guestAccess', 'Anonymous visitors may enter rooms that welcome them.'),
+      mkToggle('Allow signups', 'allowRegistration', 'Off = nobody new can create an account. The first account on an empty relay can still register.'),
+    );
+    body.append(policy);
+
+    const motd = el('section', 'block');
+    motd.append(el('h3', null, 'Notice board'));
+    const motdInput = el('input', 'input');
+    motdInput.value = data.settings.motd || '';
+    motdInput.maxLength = 300;
+    motdInput.placeholder = 'Shown to everybody at the top of the app — rules, downtime, whatever';
+    const motdSave = el('button', 'btn sm primary', 'Save notice');
+    motdSave.onclick = async () => {
+      try {
+        const res = await api('/api/admin/settings', { method: 'PATCH', body: { motd: motdInput.value } });
+        state.settings = res.settings;
+        applySettings();
+        toast(motdInput.value.trim() ? 'Notice saved' : 'Notice cleared');
+      } catch (e) { toast(e.message, 4200); }
+    };
+    const motdClear = el('button', 'btn sm', 'Clear');
+    motdClear.onclick = async () => {
+      motdInput.value = '';
+      try { const res = await api('/api/admin/settings', { method: 'PATCH', body: { motd: '' } }); state.settings = res.settings; applySettings(); toast('Notice cleared'); }
+      catch (e) { toast(e.message, 4200); }
+    };
+    motd.append(motdInput);
+    const motdActions = el('div', 'row-actions');
+    motdActions.append(motdSave, motdClear);
+    motd.append(motdActions);
+    body.append(motd);
+
+    const ann = el('section', 'block');
+    ann.append(el('h3', null, 'Announce'));
+    const annRoom = el('select', 'input sm');
+    const allOpt = el('option', null, 'every room'); allOpt.value = 'all'; annRoom.append(allOpt);
+    for (const r of data.rooms) { const o = el('option', null, r.name); o.value = r.id; annRoom.append(o); }
+    const annText = el('input', 'input');
+    annText.placeholder = 'Heads up — the box reboots in ten minutes';
+    annText.maxLength = 300;
+    const annGo = el('button', 'btn sm primary', 'Send notice');
+    annGo.onclick = async () => {
+      try {
+        const res = await api('/api/admin/announce', { method: 'POST', body: { room: annRoom.value, text: annText.value } });
+        toast(`Notice delivered to ${res.rooms} room${res.rooms === 1 ? '' : 's'} · ${res.delivered} reading`);
+        annText.value = '';
+      } catch (e) { toast(e.message, 4200); }
+    };
+    ann.append(annRoom, annText);
+    const annActions = el('div', 'row-actions');
+    annActions.append(annGo);
+    ann.append(annActions);
+    ann.append(el('p', 'hint', 'Pushed as a relay notice line in the room. It is not a message: it is never encrypted, never stored, and everyone sees it is from the relay.'));
+    body.append(ann);
+
+    const danger = el('section', 'block');
+    danger.append(el('h3', null, 'Lockdown'));
+    danger.append(el('p', 'hint', data.lockdown
+      ? 'Lockdown is on: every room is frozen, new rooms, signups and guests are stopped.'
+      : 'One switch: freeze every room, stop new rooms, close signups, stop guests. Use it when something is going wrong.'));
+    const lock = el('button', 'btn sm danger', data.lockdown ? 'Lift lockdown' : 'Lock everything down');
+    lock.onclick = async () => {
+      try {
+        const res = await api('/api/admin/lockdown', { method: 'POST', body: { on: !data.lockdown } });
+        state.settings = res.settings;
+        toast(`Lockdown ${res.lockdown ? 'on — every room frozen' : 'lifted'}`);
+        await refreshAdmin();
+      } catch (e) { toast(e.message, 4200); }
+    };
+    const guests = el('button', 'btn sm', `Clear guest sessions (${data.guestSessions})`);
+    guests.onclick = async () => {
+      try { const r = await api('/api/admin/guests', { method: 'POST', body: {} }); toast(`Cleared ${r.sessions} guest session${r.sessions === 1 ? '' : 's'}`); await renderAdmin(); }
+      catch (e) { toast(e.message, 4200); }
+    };
+    const actions = el('div', 'row-actions');
+    actions.append(lock, guests);
+    danger.append(actions);
+    body.append(danger);
   }
 
   async function banUser(username, roomId) {
@@ -978,9 +1515,20 @@
     $('railScrim').onclick = () => { $('railPanel').hidden = true; $('railScrim').hidden = true; };
     $('meBtn').onclick = openKeySheet;
     $('btnKeySheet').onclick = () => { closeSheets(); openKeySheet(); };
-    $('btnAccountSheet').onclick = () => { closeSheets(); openSheet($('accountSheet')); };
+    $('btnAccountSheet').onclick = () => { closeSheets(); renderMe(); openSheet($('accountSheet')); };
     $('btnAdminSheet').onclick = () => { closeSheets(); openAdminSheet(); };
     $('btnClaimSheet').onclick = () => { closeSheets(); openSheet($('claimSheet')); };
+    $('flairRainbow').onchange = async () => {
+      const on = $('flairRainbow').checked;
+      try {
+        const res = await api('/api/me/flair', { method: 'POST', body: { rainbow: on } });
+        state.me = res.me;
+        state.flair = res.flair || {};
+        renderMe();
+        rerenderNames(state.me.username);
+        toast(on ? 'Rainbow name on' : 'Rainbow name off');
+      } catch (e) { $('flairRainbow').checked = !on; toast(e.message, 4200); }
+    };
     $('btnNewRoom').onclick = () => { closeSheets(); openSheet($('newRoomSheet')); };
     $('btnSignOut').onclick = signOut;
     $('roomSheetBtn').onclick = () => { renderRoomSheet(); openSheet($('roomSheet')); };

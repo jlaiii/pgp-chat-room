@@ -22,6 +22,7 @@ change from the single-room build, and it is worth being precise about:
 | session token (30 days, `HttpOnly`, `SameSite=Lax`, `Secure`) | stay signed in | a stolen token is that session until it expires |
 | room names, membership, room mods, join requests | routing and approvals | who is in what room |
 | bans (target, scope, expiry, reason) | moderation | who was punished and why |
+| the audit trail in `events.log`: joins, leaves, key registrations, moderation actions, sign-in attempts | accountability — the whole point of moving presence out of a chat app and onto the site | an activity timeline. IPs are stored on auth events and served to admins only; mods get the same rows without them |
 | message metadata (id, seq, time, room, author handle + fingerprint, recipient fingerprints) | delivery and history | a social graph and timing pattern |
 | sync envelope (optional) | multi-device | an AES-GCM blob; useless without the password |
 

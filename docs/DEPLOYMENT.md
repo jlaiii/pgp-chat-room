@@ -71,7 +71,7 @@ Install the timer:
 ```ini
 # /etc/systemd/system/pgpchat-notify.service
 [Unit]
-Description=PGP Room join/leave notifier
+Description=PGP Room moderation notifier
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/pgpchat/notify.env
@@ -94,8 +94,11 @@ WantedBy=timers.target
 sudo systemctl enable --now pgpchat-notify.timer
 ```
 
-The script only ever reads `data/events.log` (handles and join/leave timestamps — never ciphertext, and
-it never sees the bot token's counterpart in the app).
+The script only ever reads `data/events.log` (metadata — never ciphertext, and it never sees the bot
+token's counterpart in the app). It carries **moderation you have to act on**: bans, role changes,
+lockdowns, account actions and any new bootstrap code. Presence is deliberately *not* sent — joins,
+leaves and key registrations belong in the admin panel's activity log, where they can be filtered and
+read on demand instead of buzzing a phone.
 
 ## 5. Verify
 
@@ -116,6 +119,8 @@ curl -sI https://chat.example.com/ | grep -i content-security-policy
 | Room state | `curl -s http://127.0.0.1:8788/healthz` |
 | **Reset the room** | stop the service, then remove `data/rooms/<roomId>/` for the room you want gone (the lounge is `lounge`) — or delete the room from the admin panel, which shreds its pool and ciphertext for you. To reset *everything*, remove `data/` entirely. Note: any browser still open re-registers its key on reconnect; close clients first if you want a truly empty room. |
 | **Seat the admin** | on a relay with no accounts, the first account to register is the admin automatically — sign up in the app and you are done (the relay clears the fallback code at the same time). If accounts exist but no admin (a vacated seat), the relay writes a one-time code to `data/settings.json` and emits an `admin-claim` event: deliver it to the operator (the bundled notifier DMs it) and use *Moderation & admin → Claim admin*. |
+| **Read the activity log** | open *Moderation & admin → Activity* (live, filterable; mods get a redacted trail) or pull it as JSON: `curl -s -H "Cookie: pgp_session=<token>" 'http://127.0.0.1:8788/api/admin/events?limit=200'`. `…/events/export` downloads the raw `.jsonl`. The bootstrap claim code is never in either response. |
+| **Trim the audit trail** | `data/events.log` is append-only metadata. Delete it whenever you like — the relay recreates it on the next event — and the bundled notifier rotates it at 5 MB when it has nothing to say. |
 | **Lost the admin seat** | stop the service, edit `data/accounts.json` and set `"role": "admin"` on your username, start it again. |
 | Upgrade | `git pull && npm ci --omit=dev && systemctl restart pgpchat` |
 

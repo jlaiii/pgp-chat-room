@@ -49,6 +49,7 @@ const CLEANUP_MS = Math.max(1, Number(CFG.cleanupMinutes != null ? CFG.cleanupMi
 
 const online = new Map();          // roomId -> Map(fp -> {handle, username, socks:Set<ws>})
 const leaveTimers = new Map();     // `${roomId}|${fp}` -> timeout
+const lastPost = new Map();        // `${roomId}|${fp}` -> ts, for per-room slow mode
 const byIp = new Map();            // ip -> {msgs,keys,conns,auth,guest,api:[]}
 
 function roomOnline(roomId) { if (!online.has(roomId)) online.set(roomId, new Map()); return online.get(roomId); }
@@ -58,8 +59,31 @@ function roomOnlineList(roomId) {
 function liveFor(roomId) { return { online: roomOnline(roomId).size, keys: chat.poolSize(roomId) }; }
 
 function event(type, extra) {
-  try { fs.appendFileSync(EVT_FILE, JSON.stringify({ t: now(), type, ...extra }) + '\n'); }
+  const rec = { t: now(), type, ...extra };
+  try { fs.appendFileSync(EVT_FILE, JSON.stringify(rec) + '\n'); }
   catch (e) { log('event-write-failed', e.message); }
+  pushEvent(rec);
+}
+
+// Live tail for the admin log: staff sockets receive every event as it happens, so
+// the website's log needs no polling. Admins see the IPs, mods do not; the bootstrap
+// code is never included for anyone.
+function pushEvent(rec) {
+  if (!wss || SECRET_EVENTS.has(rec.type)) return;
+  let adminPayload = null, modPayload = null;
+  for (const c of wss.clients) {
+    if (c.readyState !== 1) continue;
+    const rank = RANK[c.__role] ?? -1;
+    if (rank < RANK.mod) continue;
+    if (rank >= RANK.admin) {
+      if (!adminPayload) adminPayload = JSON.stringify({ t: 'evt', e: rec });
+      try { c.send(adminPayload); } catch { /* ignore */ }
+    } else {
+      if (ADMIN_ONLY_EVENTS.has(rec.type)) continue;
+      if (!modPayload) { const e = { ...rec }; delete e.ip; modPayload = JSON.stringify({ t: 'evt', e }); }
+      try { c.send(modPayload); } catch { /* ignore */ }
+    }
+  }
 }
 
 function clientIp(req) {
@@ -112,6 +136,7 @@ function meView(session) {
     kind: a.kind, username: a.username, handle: a.handle, role: a.role,
     keyFp: a.kind === 'account' ? (auth.get(a.username) || {}).keyFp || null : a.fp,
     syncKey: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncKey : false,
+    rainbow: a.kind === 'account' ? !!(auth.get(a.username) || {}).rainbow : false,
     createdAt: session.createdAt,
   };
 }
@@ -220,6 +245,88 @@ function kickSockets(pred, reason) {
   return n;
 }
 
+/* ---------- audit log (the website's admin log) ---------- */
+
+// Event types only an admin may read. Everything else in the log is staff-readable:
+// moving presence out of Telegram is only useful if mods can see the same trail.
+const ADMIN_ONLY_EVENTS = new Set(['settings', 'role', 'admin-claimed', 'admin-claim', 'lockdown', 'account-op', 'flair', 'claim-failed']);
+const SECRET_EVENTS = new Set(['admin-claim']);   // the bootstrap code never leaves the box
+
+function tailEvents(bytes = 1024 * 1024) {
+  let raw = '';
+  try {
+    const size = fs.statSync(EVT_FILE).size;
+    const start = Math.max(0, size - bytes);
+    const fd = fs.openSync(EVT_FILE, 'r');
+    const buf = Buffer.alloc(size - start);
+    if (buf.length) fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    raw = buf.toString('utf8');
+    if (start > 0) raw = raw.slice(raw.indexOf('\n') + 1);   // the window can cut a line in half
+  } catch { return []; }
+  const out = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e && e.type && !SECRET_EVENTS.has(e.type)) out.push(e);
+    } catch { /* torn or corrupt line */ }
+  }
+  return out;
+}
+
+function readEvents(params, isAdmin) {
+  const limit = clampInt(params.get('limit'), 1, 500, 200);
+  const before = Number(params.get('before')) || 0;
+  const want = String(params.get('type') || '').split(',').map(s => s.trim()).filter(Boolean);
+  let list = tailEvents();
+  if (want.length) list = list.filter(e => want.includes(e.type));
+  if (before) list = list.filter(e => e.t < before);
+  if (!isAdmin) list = list.filter(e => !ADMIN_ONLY_EVENTS.has(e.type));
+  list.sort((a, b) => b.t - a.t);
+  const events = list.slice(0, limit).map(e => { const c = { ...e }; if (!isAdmin) delete c.ip; return c; });
+  return { events, hasMore: list.length > limit, window: list.length, serverTime: now() };
+}
+
+function exportEvents(params) {
+  const want = String(params.get('type') || '').split(',').map(s => s.trim()).filter(Boolean);
+  let list = tailEvents(4 * 1024 * 1024);
+  if (want.length) list = list.filter(e => want.includes(e.type));
+  return list.map(e => JSON.stringify(e)).join('\n') + (list.length ? '\n' : '');
+}
+
+// Per-day event counts for the admin dashboard's sparkline, plus what happened in
+// the last 24h broken down by kind.
+function activitySeries(days = 7) {
+  const list = tailEvents(2 * 1024 * 1024);
+  const dayMs = 86400e3;
+  const today = Math.floor(now() / dayMs);
+  const buckets = new Array(days).fill(0);
+  const byType24h = {};
+  let total24h = 0;
+  for (const e of list) {
+    const idx = days - 1 - (today - Math.floor(e.t / dayMs));
+    if (idx >= 0 && idx < days) buckets[idx] += 1;
+    if (now() - e.t < dayMs) { byType24h[e.type] = (byType24h[e.type] || 0) + 1; total24h += 1; }
+  }
+  return { days, buckets, byType24h, total24h, scanned: list.length };
+}
+
+/* ---------- cosmetic flair (the rainbow name) ---------- */
+
+// A rendering hint only: it never touches keys, ciphertext or permissions. Sockets
+// carry it so live frames and history render the same way.
+function applyFlair(username, rainbow) {
+  for (const c of wss.clients) if (c.readyState === 1 && c.__username === username) c.__rainbow = !!rainbow;
+  const payload = JSON.stringify({ t: 'flair', username, rainbow: !!rainbow });
+  for (const c of wss.clients) if (c.readyState === 1) { try { c.send(payload); } catch { /* ignore */ } }
+}
+
+function broadcastSettings() {
+  const payload = JSON.stringify({ t: 'settings', settings: settings.publicView() });
+  for (const c of wss.clients) if (c.readyState === 1) { try { c.send(payload); } catch { /* ignore */ } }
+}
+
 /* ---------- presence ---------- */
 
 function joinPresence(ws, roomId, actor) {
@@ -315,6 +422,9 @@ async function handleRequest(req, res) {
     // -- register --
     if (method === 'POST' && p === '/api/auth/register') {
       if (!rateOk(ip, 'auth', (CFG.rate && CFG.rate.authPerMin) || 10)) return fail(res, 429, 'slow down');
+      // "Signups closed" binds everyone except the very first account on an empty
+      // relay — an operator who closes the door before signing up must still get in.
+      if (settings.data.allowRegistration === false && auth.count() > 0) return fail(res, 403, 'signups are closed right now');
       const b = await readJson(req);
       // Bootstrap: the first account on a relay that has no accounts at all seats the
       // admin, so a fresh install has an operator in one step. Every later account is a
@@ -423,8 +533,21 @@ async function handleRequest(req, res) {
         claimable: !auth.hasAdmin(),
         retentionHours: chat.retentionMs / 3600000,
         serverTime: now(),
+        flair: auth.flairMap(),
         rooms: rooms.list(actor, liveFor),
       });
+    }
+
+    // -- cosmetic flair: the rainbow name (admins only, own account only) --
+    if (method === 'POST' && p === '/api/me/flair') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      if ((RANK[actor.role] ?? 0) < RANK.admin) return fail(res, 403, 'admins only');
+      const b = await readJson(req);
+      const r = auth.setFlair(actor.username, { rainbow: !!b.rainbow });
+      if (r.error) return fail(res, 400, r.error);
+      applyFlair(actor.username, !!b.rainbow);
+      event('flair', { username: actor.username, rainbow: !!b.rainbow, by: actor.username });
+      return send(res, 200, { ok: true, me: meView(auth.resolve(session)), flair: auth.flairMap() });
     }
 
     // -- my synced key blob (opaque envelope; the server cannot open it) --
@@ -475,6 +598,7 @@ async function handleRequest(req, res) {
         if (r.error) return fail(res, 403, r.error);
         const what = typeof b.frozen === 'boolean' ? (b.frozen ? 'froze the room' : 'unfroze the room')
           : typeof b.private === 'boolean' ? (b.private ? 'made the room private' : 'made the room public')
+          : b.slowMs !== undefined ? (Number(b.slowMs) > 0 ? 'turned on slow mode' : 'turned off slow mode')
           : 'changed the room settings';
         event('room-update', { room: roomId, by: actor.username || actor.handle, what, patch: Object.keys(b || {}) });
         broadcastRoomState(roomId, `${actor.handle} ${what}`);
@@ -636,7 +760,26 @@ async function handleRequest(req, res) {
 
     /* ---- admin ---- */
     if (p.startsWith('/api/admin/')) {
-      if ((RANK[actor.role] ?? 0) < RANK.admin) return fail(res, 403, 'admin only');
+      const rankNow = RANK[actor.role] ?? 0;
+      const isAdmin = rankNow >= RANK.admin;
+
+      // The audit log is read by staff: mods get the same trail with admin-only rows
+      // and IP addresses removed, admins get everything except the bootstrap code.
+      if (method === 'GET' && p === '/api/admin/events') {
+        if (rankNow < RANK.mod) return fail(res, 403, 'staff only');
+        return send(res, 200, readEvents(url.searchParams, isAdmin));
+      }
+      if (method === 'GET' && p === '/api/admin/events/export') {
+        if (!isAdmin) return fail(res, 403, 'admin only');
+        const name = `pgp-room-events-${new Date().toISOString().slice(0, 10)}.jsonl`;
+        return send(res, 200, exportEvents(url.searchParams), {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${name}"`,
+        });
+      }
+
+      if (!isAdmin) return fail(res, 403, 'admin only');
+
       if (method === 'GET' && p === '/api/admin/overview') {
         return send(res, 200, {
           accounts: auth.list(),
@@ -644,11 +787,20 @@ async function handleRequest(req, res) {
           bans: auth.activeBans(),
           settings: settings.publicView(),
           sessions: auth.sessionCount(),
+          guestSessions: [...auth.sessions.values()].filter(s => s.kind === 'guest').length,
           online: [...online.entries()].map(([room, m]) => ({ room, online: [...m.values()].map(o => o.handle) })),
           stats: chat.stats(),
+          perRoom: rooms.all().map(r => ({
+            id: r.id, name: r.name, messages: chat.countFor(r.id), keys: chat.poolSize(r.id),
+            online: roomOnline(r.id).size, frozen: !!r.frozen, slowMs: r.slowMs || 0,
+          })),
+          activity: activitySeries(7),
+          flair: auth.flairMap(),
           retentionHours: chat.retentionMs / 3600000,
+          lockdown: !!settings.data.lockdown,
         });
       }
+
       if (method === 'PATCH' || method === 'POST') {
         const b = await readJson(req);
         if (p === '/api/admin/settings') {
@@ -656,6 +808,7 @@ async function handleRequest(req, res) {
           if (r.error) return fail(res, 403, r.error);
           event('settings', { by: actor.username, ...settings.publicView() });
           log('settings', JSON.stringify(settings.publicView()));
+          broadcastSettings();
           return send(res, 200, { ok: true, settings: r.settings });
         }
         if (p === '/api/admin/role') {
@@ -666,10 +819,115 @@ async function handleRequest(req, res) {
           if (rec.username === actor.username) return fail(res, 400, 'you cannot change your own role');
           const r = auth.setRole(target, String(b.role));
           if (r.error) return fail(res, 400, r.error);
+          // The rainbow name is an admin badge: demotion takes it away.
+          if (String(b.role) !== 'admin' && rec.rainbow) { auth.setFlair(target, { rainbow: false }); applyFlair(target, false); }
           event('role', { target, role: b.role, by: actor.username });
           log('role', target, String(b.role), 'by', actor.username);
           refreshActorSockets(target, String(b.role));
           return send(res, 200, { ok: true, account: { username: target, role: b.role } });
+        }
+
+        // One switch that closes the room: freeze everything, stop new rooms, stop
+        // guests, close signups. Lifting it clears every freeze (deliberate — that is
+        // the undo); the policy switches stay where the lockdown left them.
+        if (p === '/api/admin/lockdown') {
+          const on = b.on !== false;
+          settings.data.lockdown = on;
+          if (on) { settings.data.allowNewRooms = false; settings.data.guestAccess = false; settings.data.allowRegistration = false; }
+          settings.saveNow();
+          for (const room of rooms.all()) room.frozen = on;
+          rooms.saveNow();
+          broadcastSettings();
+          for (const room of rooms.all()) {
+            broadcastRoomState(room.id, on ? 'the relay is in lockdown — only staff can post' : 'lockdown lifted');
+          }
+          event('lockdown', { on, by: actor.username, rooms: rooms.all().length });
+          log('lockdown', on ? 'on' : 'off', `rooms=${rooms.all().length}`);
+          return send(res, 200, { ok: true, lockdown: on, rooms: rooms.list(actor, liveFor), settings: settings.publicView() });
+        }
+
+        // Relay notice: pushed as a `sys` line, never stored as a message, never
+        // encrypted — it is operator text, not somebody's chat.
+        if (p === '/api/admin/announce') {
+          const text = String(b.text || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+          if (text.length < 2) return fail(res, 400, 'write something to announce');
+          const target = String(b.room || 'all');
+          const ids = target === 'all' ? rooms.all().map(r => r.id) : [target];
+          let delivered = 0;
+          for (const id of ids) {
+            if (!rooms.get(id)) continue;
+            broadcastRoom(id, { t: 'sys', room: id, notice: true, text: `Relay notice — ${text}`, ts: now() });
+            delivered += roomOnline(id).size;
+          }
+          event('announce', { by: actor.username, room: target, text });
+          log('announce', target, text.slice(0, 60));
+          return send(res, 200, { ok: true, rooms: ids.length, delivered });
+        }
+
+        // Per-account actions. Admins are never a target: the seat cannot be removed
+        // by another admin, and nobody may act on themselves.
+        if (p === '/api/admin/account') {
+          const target = String(b.username || '').toLowerCase();
+          const rec = auth.get(target);
+          if (!rec) return fail(res, 404, 'no such account');
+          const op = String(b.op || '');
+          if (op === 'rainbow') {
+            const r = auth.setFlair(target, { rainbow: !!b.rainbow });
+            if (r.error) return fail(res, 400, r.error);
+            applyFlair(target, !!b.rainbow);
+            event('flair', { username: target, rainbow: !!b.rainbow, by: actor.username });
+            return send(res, 200, { ok: true, rainbow: !!b.rainbow, flair: auth.flairMap() });
+          }
+          if (rec.username === actor.username) return fail(res, 400, 'that is your own account');
+          if (rec.role === 'admin') return fail(res, 403, 'admins cannot be removed by other admins');
+          if (op === 'signout') {
+            const sessions = auth.dropSessionsFor(target);
+            const sockets = kickSockets(c => c.__username === target, 'signed out by an admin');
+            event('account-op', { op, target, by: actor.username, sessions, sockets });
+            log('account-op', op, target, `sessions=${sessions}`);
+            return send(res, 200, { ok: true, sessions, sockets });
+          }
+          if (op === 'delete') {
+            // Hand over anything they owned so rooms are never orphaned.
+            const took = [];
+            for (const room of rooms.all()) {
+              if (room.owner === target) { room.owner = actor.username; room.members = [...new Set([...room.members, actor.username])]; took.push(room.id); }
+              room.members = room.members.filter(u => u !== target);
+              room.mods = room.mods.filter(u => u !== target);
+              room.pending = room.pending.filter(u => u !== target);
+            }
+            rooms.saveNow();
+            const r = auth.deleteAccount(target);
+            if (r.error) return fail(res, 400, r.error);
+            const sockets = kickSockets(c => c.__username === target, 'account deleted');
+            for (const id of took) broadcastRoomState(id, 'the room changed hands');
+            event('account-op', { op, target, by: actor.username, rooms: took.join(',') || null, sockets });
+            log('account-op', op, target, `rooms=${took.length}`);
+            return send(res, 200, { ok: true, rooms: took, sessions: r.sessionsDropped, sockets });
+          }
+          return fail(res, 400, 'unknown op');
+        }
+
+        // Clear every anonymous guest session in one move.
+        if (p === '/api/admin/guests') {
+          let sessions = 0;
+          for (const [tok, s] of [...auth.sessions]) if (s.kind === 'guest') { auth.sessions.delete(tok); sessions++; }
+          if (sessions) auth.saveNow();
+          const sockets = kickSockets(c => c.__kind === 'guest', 'guest sessions were cleared');
+          event('account-op', { op: 'guest-purge', by: actor.username, sessions, sockets });
+          log('guest-purge', `sessions=${sessions}`, `sockets=${sockets}`);
+          return send(res, 200, { ok: true, sessions, sockets });
+        }
+
+        // Burn a room's stored ciphertext now instead of waiting for the window.
+        if (p === '/api/admin/purge') {
+          const roomId = String(b.room || '');
+          if (!rooms.get(roomId)) return fail(res, 404, 'no such room');
+          const r = chat.purge(roomId);
+          event('room-purge', { room: roomId, by: actor.username, rows: r.purgedRows, files: r.purgedFiles });
+          log('room-purge', roomId, `rows=${r.purgedRows}`);
+          broadcastRoomState(roomId, 'the relay cleared this room’s stored ciphertext');
+          return send(res, 200, { ok: true, ...r });
         }
       }
       return fail(res, 404, 'not found');
@@ -806,11 +1064,19 @@ wss.on('connection', (ws, req) => {
       if (!ct.startsWith(MSG_HEAD) || !ct.includes('END PGP MESSAGE') || ct.length > chat.maxMsgBytes) {
         ws.send(JSON.stringify({ t: 'err', msg: 'bad ciphertext' })); return;
       }
+      // Slow mode: a per-room floor between one identity's messages. Mods and the
+      // room's own staff are exempt (they are the ones who set it).
+      if (room.slowMs && !(rooms.can(actor, 'freeze', room))) {
+        const key = `${roomId}|${ws.__fp}`;
+        const wait = room.slowMs - (now() - (lastPost.get(key) || 0));
+        if (wait > 0) { ws.send(JSON.stringify({ t: 'err', msg: `slow mode — ${Math.ceil(wait / 1000)}s to go` })); return; }
+      }
       const recipients = Array.isArray(m.recipients)
         ? [...new Set(m.recipients.map(r => String(r).toLowerCase()).filter(r => FP_RE.test(r)))]
         : [];
       const r = chat.add(roomId, { fp: ws.__fp, handle: ws.__handle, ct, recipients, id: uuid() });
       if (r.error) { ws.send(JSON.stringify({ t: 'err', msg: r.error })); return; }
+      if (room.slowMs) lastPost.set(`${roomId}|${ws.__fp}`, now());
       const rec = r.message;
       const base = { id: rec.id, seq: rec.seq, t: rec.t, fp: rec.fp, handle: rec.handle, ct: rec.ct, room: roomId };
       const selfPayload = JSON.stringify({ t: 'msg', m: { ...base, tmpId: m.tmpId || null } });

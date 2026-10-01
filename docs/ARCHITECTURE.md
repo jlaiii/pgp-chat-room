@@ -31,7 +31,7 @@ hash never touches a message and cannot decrypt anything.
 | `lib/auth.js` | accounts (scrypt), sessions (30-day tokens), roles, bans (site-wide and per-room) |
 | `lib/rooms.js` | room registry, membership, `can(actor, action, room)` — **all permissions live here** so HTTP and WS cannot drift |
 | `lib/chat.js` | per-room key pools, per-room per-day ciphertext segments, retention shredder, room teardown |
-| `lib/settings.js` | the two site switches the admin panel flips, plus the bootstrap claim code |
+| `lib/settings.js` | the site policy the admin panel flips (new rooms, guests, signups, lockdown, notice board) plus the bootstrap claim code |
 | `public/identity.js` | browser keypair, localStorage layout, backup/restore, password-wrapped envelope |
 | `public/app.js` | client state machine, API/WS clients, every view, all cryptography |
 
@@ -39,17 +39,21 @@ hash never touches a message and cannot decrypt anything.
 
 ```
 data/
-├── settings.json                 {allowNewRooms, guestAccess, adminClaim, createdAt}
-├── accounts.json                 [{username, salt, hash, scryptN, role, createdAt, lastLogin, keyFp, syncKey}]
+├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, adminClaim, createdAt}
+├── accounts.json                 [{username, salt, hash, scryptN, role, rainbow, createdAt, lastLogin, keyFp, syncKey}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
 ├── bans.json                     [{id, kind, target, room, until, reason, by, at}]
-├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles}]
-├── events.log                    append-only audit trail (join/leave/key/ban/role/settings/admin-claim…)
+├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles, slowMs}]
+├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/purge…), streamed live to staff sockets and served by the admin panel
 └── rooms/
     └── <roomId>/
         ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
         └── messages/<utc-day>.jsonl   one ciphertext row per line
 ```
+
+`rainbow` and `slowMs` are cosmetic or policy fields — they never touch keys or ciphertext.
+`events.log` holds metadata only, and the one secret that ever passes through it (`admin-claim`,
+the bootstrap code) is filtered out of every API path.
 
 Durability is deliberate and split: **identity and moderation writes are synchronous**
 (`saveNow()` — a lost ban is unacceptable), while high-frequency traffic (`lastSeen`, key
@@ -82,6 +86,10 @@ record on every request, so a promotion or demotion applies to **live sockets** 
 | create a room | no | if `allowNewRooms` | yes | always | — |
 | delete a room | no | own room | own room | any (not the lounge) | own room |
 | site settings, roles | no | no | no | yes | no |
+| activity log (live audit trail) | no | no | yes (no admin rows, no IPs) | yes | no |
+| announce, lockdown, purge, guest purge | no | no | no | yes | no |
+| sign out / delete an account | no | no | no | users, mods (never an admin, never yourself) | no |
+| slow mode (per-room floor) | no | room owner | room mod | yes | yes |
 
 Two consequences worth knowing:
 

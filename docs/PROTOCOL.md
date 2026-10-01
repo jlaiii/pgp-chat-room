@@ -18,10 +18,12 @@ does not match `Host` is rejected with 403 before it is routed.
 | POST | `/api/auth/password` | `{current, next}` | other sessions of that account are dropped |
 | POST | `/api/auth/claim` | `{code}` | fallback bootstrap: promotes the caller to `admin` while no admin exists (a vacant seat); 409 once one does |
 | POST | `/api/guest` | `{handle?, fp?}` | 201 + guest session; 403 when guest access is off |
-| GET | `/api/me` | — | `{me, settings, claimable, retentionHours, rooms[]}` |
+| GET | `/api/me` | — | `{me, settings, claimable, retentionHours, flair, rooms[]}` |
+| POST | `/api/me/flair` | `{rainbow}` | admin only: the cosmetic rainbow name, own account only |
 | GET/PUT/DELETE | `/api/sync-key` | `{enabled, blob}` | accounts only; the blob is an opaque sealed envelope |
 
-`me` carries `{kind, username, handle, role, keyFp, syncKey, createdAt}`.
+`me` carries `{kind, username, handle, role, keyFp, syncKey, rainbow, createdAt}`. `flair` is the
+map of which handles render with the animated name — a rendering hint, never a permission.
 
 ## Rooms
 
@@ -29,7 +31,7 @@ does not match `Host` is rejected with 403 before it is routed.
 |---|---|---|
 | GET | `/api/rooms` | rooms this actor may see, each with `canEdit/canApprove/canDelete/frozen/private/pendingCount` |
 | POST | `/api/rooms` | `{name, about?, private?, guestOk?}` — 403 when new rooms are disabled and you are not an admin |
-| GET/PATCH/DELETE | `/api/rooms/<id>` | PATCH accepts `{frozen?, private?, guestOk?, name?, about?, allowFiles?}` |
+| GET/PATCH/DELETE | `/api/rooms/<id>` | PATCH accepts `{frozen?, private?, guestOk?, name?, about?, allowFiles?, slowMs?}` (`slowMs` is the per-room floor between one identity's posts; 0 = off, staff are exempt) |
 | POST | `/api/rooms/<id>/join` | public → member; private → `{pending: true}` and the room's staff are notified |
 | POST | `/api/rooms/<id>/leave` | leaving a room you own hands it to a room mod, else to nobody |
 | GET | `/api/rooms/<id>/state` | room view + who is online right now |
@@ -48,9 +50,16 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 | POST | `/api/mod/ban` | `{target, kind: account\|fp, room?: null, hours?: 1..720, reason?}` — `hours` omitted = permanent |
 | POST | `/api/mod/unban` | `{id}` or `{kind, target, room}` |
 | GET | `/api/mod/bans` | active bans (mod+) |
-| GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats (admin) |
-| PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?}` (admin) |
+| GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts, a 7-day activity series (admin) |
+| PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?}` (admin) |
 | POST | `/api/admin/role` | `{username, role}` — cannot change your own role (admin) |
+| GET | `/api/admin/events` | `?type=&limit=&before=` (mod+) — the audit log, newest first. Mods lose admin-only rows and IP addresses; the bootstrap claim code is never served to anyone |
+| GET | `/api/admin/events/export` | the same trail as an `application/x-ndjson` download (admin) |
+| POST | `/api/admin/announce` | `{room: "<id>"\|"all", text}` (admin) — pushes a `sys` notice frame; never stored, never encrypted |
+| POST | `/api/admin/lockdown` | `{on}` (admin) — freezes every room; `on` also stops new rooms, signups and guests. Lifting clears the freezes but leaves the switches where they were |
+| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, rainbow`. Admins are never a target and you cannot act on yourself |
+| POST | `/api/admin/guests` | clears every guest session (admin) |
+| POST | `/api/admin/purge` | `{room}` (admin) — shreds that room's stored ciphertext now, disk and memory |
 
 ## WebSocket `/ws`
 
@@ -74,11 +83,15 @@ Server → client:
 {"t":"msg","m":{"id","seq","t","fp","handle","ct","room"}}                     // others
 {"t":"msg","m":{"…","tmpId":"t1727…"}}                                          // the author's own socket
 {"t":"sys","room":"lounge","text":"casey joined","ts":1790…}
+{"t":"sys","room":"lounge","notice":true,"text":"Relay notice — rebooting in ten minutes","ts":1790…}   // admin announcement
 {"t":"presence","room":"lounge","online":[{"fp","handle","username"}],"count":3}
 {"t":"key:add","room":"lounge","key":{"fp","handle","publicKey","joinedAt"}}
 {"t":"room","room":{…},"frozen":true,"canPost":false}      // state changed: freeze, privacy, members
 {"t":"err","msg":"this room is frozen"}                    // also used for informational notices
 {"t":"kick","reason":"you are banned from lounge until 2026-10-01 04:12Z"}
+{"t":"evt","e":{"t":1790…,"type":"join","room":"lounge",…}}  // staff only: the live admin log
+{"t":"flair","username":"jay","rainbow":true}                // someone changed their name flair
+{"t":"settings","settings":{…}}                              // policy changed; clients follow live
 {"t":"pong"}
 ```
 

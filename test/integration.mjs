@@ -431,6 +431,183 @@ test('PGP Room relay — end to end', async t => {
     assert.equal(on.body.settings.allowNewRooms, true);
   });
 
+  await t.test('the admin log is staff-only, hides admin rows from mods, and never serves the bootstrap code', async () => {
+    assert.equal((await user('GET', '/api/admin/events')).status, 403, 'ordinary members cannot read the log');
+
+    const asMod = await mod('GET', '/api/admin/events?limit=200');
+    assert.equal(asMod.status, 200);
+    const modTypes = new Set(asMod.body.events.map(e => e.type));
+    assert.ok(modTypes.size > 0, 'staff see the trail');
+    assert.ok(!['settings', 'role', 'admin-claimed', 'lockdown', 'account-op'].some(t => modTypes.has(t)),
+      'mods do not get admin-only rows');
+    assert.ok(asMod.body.events.every(e => e.ip === undefined), 'mods do not get IP addresses');
+
+    const asAdmin = await admin('GET', '/api/admin/events?limit=200');
+    assert.equal(asAdmin.status, 200);
+    assert.ok(asAdmin.body.events.length > 0);
+    assert.ok(asAdmin.body.events.every(e => e.type !== 'admin-claim'), 'the bootstrap code is never served');
+    assert.ok(asAdmin.body.events.some(e => e.type === 'role'), 'admins see role changes');
+    assert.ok(asAdmin.body.events.every(e => typeof e.t === 'number'), 'rows carry their own timestamp');
+
+    const onlyBans = await admin('GET', '/api/admin/events?type=join&limit=5');
+    assert.ok(onlyBans.body.events.every(e => e.type === 'join'), 'the type filter works');
+    assert.ok(onlyBans.body.events.length <= 5);
+
+    const dump = await fetch(`${BASE}/api/admin/events/export`, { headers: { Cookie: admin.cookie() } });
+    assert.equal(dump.status, 200);
+    const text = await dump.text();
+    const rows = text.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    assert.ok(rows.length > 0, 'the export is jsonl');
+    assert.ok(rows.every(e => e.type !== 'admin-claim'), 'the export hides the bootstrap code too');
+    const refused = await fetch(`${BASE}/api/admin/events/export`, { headers: { Cookie: mod.cookie() } });
+    assert.equal(refused.status, 403, 'a mod cannot download the log');
+  });
+
+  await t.test('an announcement is a relay notice, not a message', async () => {
+    const N = await makeKey('watcher');
+    const watcher = makeClient();
+    await watcher('POST', '/api/auth/register', JSON.stringify({ username: 'noticewatcher', password: 'notice-watch-1' }));
+    await watcher('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: N.fp, keyId: N.keyId, handle: 'noticewatcher', publicKey: N.publicKey }));
+    const conn = await connect(watcher.cookie());
+    conn.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: N.fp, handle: 'noticewatcher' }));
+    await waitFor(conn.frames, f => f.t === 'welcome');
+
+    const before = (await api('/healthz')).body.messages;
+    const sent = await admin('POST', '/api/admin/announce', JSON.stringify({ room: 'lounge', text: 'the box reboots in ten minutes' }));
+    assert.equal(sent.status, 200);
+    assert.equal(sent.body.rooms, 1);
+
+    const notice = await waitFor(conn.frames, f => f.t === 'sys' && f.notice === true);
+    assert.match(notice.text, /Relay notice — the box reboots in ten minutes/);
+    assert.equal((await api('/healthz')).body.messages, before, 'a notice is never stored as a message');
+    assert.equal((await admin('POST', '/api/admin/announce', JSON.stringify({ room: 'lounge', text: ' ' }))).status, 400, 'empty notices are refused');
+    conn.ws.close();
+  });
+
+  await t.test('lockdown freezes every room, stops guests and closes signups; lifting clears the freezes', async () => {
+    const on = await admin('POST', '/api/admin/lockdown', JSON.stringify({ on: true }));
+    assert.equal(on.status, 200);
+    assert.equal(on.body.lockdown, true);
+    assert.equal(on.body.settings.allowNewRooms, false, 'new rooms are off while locked down');
+    assert.equal(on.body.settings.guestAccess, false, 'guests are off while locked down');
+    assert.ok(on.body.rooms.length > 0 && on.body.rooms.every(r => r.frozen), 'every room is frozen');
+
+    const late = makeClient();
+    assert.equal((await late('POST', '/api/auth/register', JSON.stringify({ username: 'latecomer', password: 'too-late-now-1' }))).status, 403,
+      'signups are closed while locked down');
+    assert.equal((await makeClient()('POST', '/api/guest', JSON.stringify({ handle: 'nope-nope-1' }))).status, 403, 'guests are refused');
+
+    const off = await admin('POST', '/api/admin/lockdown', JSON.stringify({ on: false }));
+    assert.equal(off.body.lockdown, false);
+    assert.ok(off.body.rooms.every(r => !r.frozen), 'lifting lockdown clears the freezes');
+    assert.equal(off.body.settings.allowRegistration, false, 'the switches stay where the lockdown left them');
+    // Lifting is not a policy reset: the operator puts the switches back himself.
+    const restored = await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowNewRooms: true, guestAccess: true, allowRegistration: true }));
+    assert.equal(restored.body.settings.allowRegistration, true);
+    assert.equal((await late('POST', '/api/auth/register', JSON.stringify({ username: 'latecomer', password: 'too-late-now-1' }))).status, 201,
+      'with signups back on, an account can be made again');
+    assert.equal((await makeClient()('POST', '/api/guest', JSON.stringify({ handle: 'now-allowed-1' }))).status, 201, 'guests are welcome again');
+  });
+
+  await t.test('slow mode throttles one identity in a room and spares moderators', async () => {
+    const made = await admin('POST', '/api/rooms', JSON.stringify({ name: 'Slow Room' }));
+    assert.equal(made.status, 201);
+    const slowRoom = made.body.room.id;
+    const patched = await admin('PATCH', `/api/rooms/${slowRoom}`, JSON.stringify({ slowMs: 5000 }));
+    assert.equal(patched.status, 200);
+    assert.equal(patched.body.room.slowMs, 5000, 'the floor is published to clients');
+
+    const S = await makeKey('slow');
+    const slowpoke = makeClient();
+    await slowpoke('POST', '/api/auth/register', JSON.stringify({ username: 'slowpoke', password: 'slow-poke-pass-1' }));
+    await slowpoke('POST', '/api/keys', JSON.stringify({ room: slowRoom, fp: S.fp, keyId: S.keyId, handle: 'slowpoke', publicKey: S.publicKey }));
+    const conn = await connect(slowpoke.cookie());
+    conn.ws.send(JSON.stringify({ t: 'hello', room: slowRoom, fp: S.fp, handle: 'slowpoke' }));
+    await waitFor(conn.frames, f => f.t === 'welcome');
+
+    const blob = await openpgp.encrypt({ message: await openpgp.createMessage({ text: 'first' }), encryptionKeys: [await openpgp.readKey({ armoredKey: S.publicKey })], signingKeys: S.priv, format: 'armored' });
+    conn.ws.send(JSON.stringify({ t: 'send', room: slowRoom, tmpId: 'one', ct: blob, recipients: [S.fp] }));
+    await waitFor(conn.frames, f => f.t === 'msg' && f.m.tmpId === 'one');
+    conn.ws.send(JSON.stringify({ t: 'send', room: slowRoom, tmpId: 'two', ct: blob, recipients: [S.fp] }));
+    const refused = await waitFor(conn.frames, f => f.t === 'err' && /slow mode/.test(f.msg));
+    assert.match(refused.msg, /slow mode/);
+
+    // the admin sets the pace, so the admin is not held to it
+    const A = await makeKey('boss');
+    await admin('POST', '/api/keys', JSON.stringify({ room: slowRoom, fp: A.fp, keyId: A.keyId, handle: 'jay', publicKey: A.publicKey }));
+    const bossConn = await connect(admin.cookie());
+    bossConn.ws.send(JSON.stringify({ t: 'hello', room: slowRoom, fp: A.fp, handle: 'jay' }));
+    await waitFor(bossConn.frames, f => f.t === 'welcome');
+    const bossBlob = await openpgp.encrypt({ message: await openpgp.createMessage({ text: 'staff' }), encryptionKeys: [await openpgp.readKey({ armoredKey: A.publicKey })], signingKeys: A.priv, format: 'armored' });
+    bossConn.ws.send(JSON.stringify({ t: 'send', room: slowRoom, tmpId: 'b1', ct: bossBlob, recipients: [A.fp] }));
+    await waitFor(bossConn.frames, f => f.t === 'msg' && f.m.tmpId === 'b1');
+    bossConn.ws.send(JSON.stringify({ t: 'send', room: slowRoom, tmpId: 'b2', ct: bossBlob, recipients: [A.fp] }));
+    await waitFor(bossConn.frames, f => f.t === 'msg' && f.m.tmpId === 'b2');
+
+    await admin('PATCH', `/api/rooms/${slowRoom}`, JSON.stringify({ slowMs: 0 }));
+    conn.ws.close();
+    bossConn.ws.close();
+  });
+
+  await t.test('the rainbow name is admin flair: own account, broadcast, and lost on demotion', async () => {
+    assert.equal((await user('POST', '/api/me/flair', JSON.stringify({ rainbow: true }))).status, 403, 'members cannot set flair');
+    const on = await admin('POST', '/api/me/flair', JSON.stringify({ rainbow: true }));
+    assert.equal(on.status, 200);
+    assert.equal(on.body.me.rainbow, true);
+    assert.equal(on.body.flair.jay, true, 'other clients are told which names to animate');
+    assert.equal((await admin('GET', '/api/me')).body.flair.jay, true, 'the flair map rides on /api/me');
+
+    const logged = await admin('GET', '/api/admin/events?type=flair');
+    assert.ok(logged.body.events.some(e => e.username === 'jay' && e.rainbow === true), 'flair changes are audited');
+
+    const overview = await admin('GET', '/api/admin/overview');
+    assert.equal(overview.body.accounts.find(a => a.username === 'jay').rainbow, true);
+
+    assert.equal((await admin('POST', '/api/admin/role', JSON.stringify({ username: 'morgan', role: 'admin' }))).status, 200);
+    const painted = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'morgan', op: 'rainbow', rainbow: true }));
+    assert.equal(painted.body.rainbow, true, 'an admin can paint another admin');
+    await admin('POST', '/api/admin/role', JSON.stringify({ username: 'morgan', role: 'mod' }));
+    const after = await admin('GET', '/api/admin/overview');
+    assert.equal(after.body.flair.morgan, undefined, 'demotion takes the badge away');
+  });
+
+  await t.test('an admin can sign an account out everywhere, delete it, and never orphan its rooms', async () => {
+    const temp = makeClient();
+    await temp('POST', '/api/auth/register', JSON.stringify({ username: 'tempuser', password: 'temporary-pass-1' }));
+    const owned = await temp('POST', '/api/rooms', JSON.stringify({ name: 'Temp Room' }));
+    assert.equal(owned.status, 201);
+    const rid = owned.body.room.id;
+
+    const out = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'tempuser', op: 'signout' }));
+    assert.equal(out.status, 200);
+    assert.ok(out.body.sessions >= 1, 'their sessions are dropped');
+    assert.equal((await temp('GET', '/api/me')).status, 401, 'the session is really gone');
+
+    await temp('POST', '/api/auth/login', JSON.stringify({ username: 'tempuser', password: 'temporary-pass-1' }));
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'tempuser', op: 'delete' }))).status, 200);
+    const overview = await admin('GET', '/api/admin/overview');
+    assert.ok(!overview.body.accounts.some(a => a.username === 'tempuser'), 'the account is gone');
+    assert.ok(overview.body.rooms.some(r => r.id === rid && r.owner === 'jay'), 'their room passed to the acting admin');
+
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'jay', op: 'delete' }))).status, 400, 'nobody deletes themselves');
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'nobody-here', op: 'signout' }))).status, 404);
+  });
+
+  await t.test('an admin can burn a room’s stored ciphertext on the spot', async () => {
+    const loungeRows = async () => ((await admin('GET', '/api/admin/overview')).body.perRoom.find(r => r.id === 'lounge') || {}).messages || 0;
+    const before = await loungeRows();
+    assert.ok(before > 0, 'the lounge has rows from the message tests');
+    const burned = await admin('POST', '/api/admin/purge', JSON.stringify({ room: 'lounge' }));
+    assert.equal(burned.status, 200);
+    assert.ok(burned.body.purgedRows > 0, 'rows were shredded');
+    assert.equal(await loungeRows(), 0, 'memory is empty too');
+    const segDir = path.join(dir, 'data', 'rooms', 'lounge', 'messages');
+    for (const f of (await readdir(segDir)).filter(f => f.endsWith('.jsonl'))) {
+      assert.equal((await readFile(path.join(segDir, f), 'utf8')).trim(), '', `segment not emptied: ${f}`);
+    }
+    assert.equal((await admin('POST', '/api/admin/purge', JSON.stringify({ room: 'no-such-room' }))).status, 404);
+  });
+
   await t.test('rate limits a burst of sends', async () => {
     const connA = await connect(guest.cookie());
     connA.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: A.fp, handle: 'alice-1' }));

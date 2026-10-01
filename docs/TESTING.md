@@ -8,12 +8,18 @@ npm test          # node --test test/  — spawns a real relay on a temp data di
 
 Covers: the shell + CSP, that every API needs a session, the admin bootstrap (the first account on an
 empty relay is seated as `admin`, later accounts are plain `user`s, and the fallback claim code still
-seats one on a vacated seat while refusing a wrong code), roles and promotions, guest sessions, malformed/private-key rejection, the
-pre-join message staying unreadable to a later key, a post-join message decrypting and verifying its
-signature, a non-recipient failing to decrypt, ciphertext-only storage (per room), a private room
-staying invisible with join-requests needing approval, a freeze blocking ordinary members but not
-mods/owners, a ban dropping the live socket and refusing the next sign-in, the rate limiter, and the
-retention sweep on restart. It leaves nothing behind — everything happens under a `mkdtemp` directory.
+seats one on a vacated seat while refusing a wrong code), roles and promotions, guest sessions,
+malformed/private-key rejection, the pre-join message staying unreadable to a later key, a post-join
+message decrypting and verifying its signature, a non-recipient failing to decrypt, ciphertext-only
+storage (per room), a private room staying invisible with join-requests needing approval, a freeze
+blocking ordinary members but not mods/owners, a ban dropping the live socket and refusing the next
+sign-in, the rate limiter, the retention sweep on restart, and the admin surface: the activity log is
+staff-only and never serves the bootstrap code (mods lose admin rows and IPs, the export refuses a
+mod), an announcement lands as a relay notice and never as a stored message, lockdown freezes every
+room and closes signups and guests while lifting it clears the freezes, slow mode throttles one
+identity but not staff, the rainbow flair is admin-only and dropped on demotion, an account can be
+signed out everywhere and deleted with its rooms handed over, and a room's ciphertext can be burned on
+the spot. It leaves nothing behind — everything happens under a `mkdtemp` directory.
 
 ## Manual, two identities
 

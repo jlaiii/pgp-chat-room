@@ -32,9 +32,22 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   mods handle people and rooms; the owner of a room controls that room.
 - **Moderation.** Ban or **temp-ban** (1h … 30 days) an account site-wide or per-room, kick
   someone from a room, approve or deny join requests, promote room mods, freeze a room,
-  delete a room (its key pool and ciphertext are shredded with it).
-- **Admin panel.** Turn new rooms off, turn guest access off, freeze/unfreeze any room, change
-  roles, review active bans, watch relay totals.
+  **slow mode** (a per-room floor between one identity's posts), **burn a room's stored ciphertext
+  on the spot**, delete a room (its key pool and ciphertext are shredded with it).
+- **Admin panel.** Six tabs — overview, activity, people, rooms, bans, settings. Close signups,
+  stop new rooms, stop guests, **lock every room down with one switch**, set a site-wide notice,
+  push a relay notice into a room, sign an account out on every device, delete an account (its
+  rooms pass to the admin, never orphaned), ban by account *or* device fingerprint, and watch
+  totals, a 7-day sparkline and who is online right now.
+- **The activity log lives on the site, not in your phone.** Every join, leave, key registration,
+  ban, role change and sign-in attempt streams into the admin panel live. Filter it by kind, or
+  download the raw `.jsonl`. Mods see the same trail minus admin-only rows and IP addresses; the
+  bootstrap claim code is never served to anyone. Message content is *not* in it — the relay cannot
+  read a message, so there is nothing to log.
+- **The rainbow name.** An admin can switch on a cosmetic flair that gives their display name an
+  animated colour sweep: each letter carries its own hue and its own phase, so the fade travels
+  left to right. It is a rendering hint only — no key, no ciphertext, no permission — and it is
+  dropped the moment the account is demoted.
 - **Handles and keys.** Each browser makes its own Curve25519 keypair on first visit. Rename a
   guest handle, download or restore a key backup, and optionally **sync your key**: the private
   key is wrapped in the browser with a key derived from your password (PBKDF2 250k → AES-GCM)
@@ -53,6 +66,8 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | session tokens (30-day, HttpOnly cookie) | anyone's private key |
 | room names, membership, room mods, join requests | the contents of the sync envelope |
 | bans (target, scope, expiry, reason) | attachments (they are encrypted client-side) |
+| the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
+| the site notice text and which admins wear the rainbow badge | |
 | message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
 | the optional **sealed** key envelope (opaque; no password ever reaches the server) | |
 
@@ -89,6 +104,26 @@ admin exists, boot generates a one-time 8-character code into `data/settings.jso
 `admin-claim` event; `scripts/telegram-notify.py` (or your own reader of `data/events.log`) delivers
 it to the operator, who enters it in the app under *Moderation & admin → Claim admin*. It burns on
 use, and an empty relay clears it at the first signup because the seat is already taken.
+
+### The admin panel
+
+*Moderation & admin* in the rail has six tabs:
+
+| tab | what it is for |
+|---|---|
+| **Overview** | live totals (online, keys, stored rows, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
+| **Activity** | the audit log: joins, leaves, keys, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` |
+| **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, sign out everywhere, delete, ban, and the rainbow-name toggle |
+| **Rooms** | rename/about, **slow mode**, freeze, guest access, make private, clear stored ciphertext now, delete |
+| **Bans** | place a ban against an account or a device fingerprint, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown |
+| **Settings** | allow new rooms, allow guests, allow signups, the site notice, announcements, and **lockdown** |
+
+**Lockdown** is the panic switch: freeze every room, stop new rooms, close signups and stop guests.
+Lifting it clears every freeze but deliberately leaves the switches where the lockdown left them —
+it is an undo for the freeze, not a policy reset.
+
+**Announcements** are relay notices: a line pushed into a room's log, marked as coming from the
+relay and never stored as a message (the relay does not get to fabricate chat).
 
 ## Configuration
 
@@ -132,7 +167,11 @@ The suite asserts the properties this project actually promises: a key that join
 read earlier ciphertext, post-join messages decrypt *and verify*, non-recipients fail, only
 ciphertext reaches disk, the rate limiter engages, the retention sweep empties segments, a
 private room stays invisible to non-members, a freeze blocks ordinary members but not mods or
-owners, and a ban drops the live socket. CI runs it on every push.
+owners, a ban drops the live socket, the first account on an empty relay seats the admin while the
+claim code stays the fallback for a vacated seat, the admin log is staff-only and never serves the
+claim code, lockdown closes the doors, slow mode throttles one identity but not staff, announcements
+are never stored as messages, account deletion hands over the rooms, and an admin can burn a room's
+ciphertext on the spot. CI runs it on every push.
 
 ## Honest limits
 
@@ -143,5 +182,8 @@ owners, and a ban drops the live socket. CI runs it on every push.
 - **Key sync depends on your password.** The envelope is only as strong as the password you chose.
 - **A weaker password is a weaker door** — regardless of the 250k-round KDF.
 - **Guests are anonymous by definition**: a fresh device is a fresh identity.
+- **The audit trail outlives a message.** Ciphertext is shredded on a timer; `data/events.log` is
+  not. An operator can see that someone was in a room long after the messages are gone. It is a
+  plain file: delete it whenever you want, and the relay only ever appends to it.
 
 MIT licensed.
