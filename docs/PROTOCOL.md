@@ -39,6 +39,8 @@ map of which handles render with the animated name — a rendering hint, never a
 | POST | `/api/rooms/<id>/keys` | register/refresh this browser's public key **in this room** |
 | GET | `/api/rooms/<id>/pool` | every public key in the room + `retentionHours`, `frozen` |
 | GET | `/api/rooms/<id>/history?fp=&limit=` | rows that fingerprint is a recipient of, plus `lockedCount` |
+| POST | `/api/rooms/<id>/files` | raw ciphertext body + `X-Content-Kind: image\|video\|file`. 201 `{id,size}`. 403 unless the site switch for that kind **and** the room's `allowFiles` are on; 413 over `maxFileBytes` (refused before the body is read) |
+| GET | `/api/rooms/<id>/files/<fileId>` | the sealed blob back, `application/octet-stream`, `no-store`, for anyone who may read the room. 404 once retention has shredded it |
 
 Legacy single-room endpoints `/api/keys`, `/api/pool` and `/api/history` still work and resolve to
 the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
@@ -47,17 +49,22 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 
 | method | path | notes |
 |---|---|---|
-| POST | `/api/mod/ban` | `{target, kind: account\|fp, room?: null, hours?: 1..720, reason?}` — `hours` omitted = permanent |
+| POST | `/api/mod/ban` | `{target, kind: account\|fp\|ip, room?: null, hours?: 1..720, reason?, mute?}` — `hours` omitted = permanent, `mute: true` = post-block that keeps their session. IP bans are admin-only |
 | POST | `/api/mod/unban` | `{id}` or `{kind, target, room}` |
 | GET | `/api/mod/bans` | active bans (mod+) |
-| GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts, a 7-day activity series (admin) |
-| PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?}` (admin) |
+| GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts (rows, keys, attachments, bytes), a 7-day activity series, live sessions (admin) |
+| PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?, allowImages?, allowVideo?, allowFiles?, keySyncDefault?, retentionHours?: number\|null, keepForever?}` (admin). Changing the window sweeps the relay immediately |
 | POST | `/api/admin/role` | `{username, role}` — cannot change your own role (admin) |
+| GET | `/api/admin/sessions` | every live session with a 12-char hashed id; the raw token is never returned (admin) |
+| POST | `/api/admin/sessions` | `{id}` revokes that one session and drops its socket (admin) |
+| GET | `/api/admin/accounts/export` | the account table as `.jsonl` (admin) |
+| POST | `/api/admin/room` | `{room, op}` with op ∈ `owner` (hand the room to an account, default you), `kickall` (admin) |
+| POST | `/api/admin/bans` | lifts every ban and mute at once (admin) |
 | GET | `/api/admin/events` | `?type=&limit=&before=` (mod+) — the audit log, newest first. Mods lose admin-only rows and IP addresses; the bootstrap claim code is never served to anyone |
 | GET | `/api/admin/events/export` | the same trail as an `application/x-ndjson` download (admin) |
 | POST | `/api/admin/announce` | `{room: "<id>"\|"all", text}` (admin) — pushes a `sys` notice frame; never stored, never encrypted |
 | POST | `/api/admin/lockdown` | `{on}` (admin) — freezes every room; `on` also stops new rooms, signups and guests. Lifting clears the freezes but leaves the switches where they were |
-| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, rainbow`. Admins are never a target and you cannot act on yourself |
+| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, rainbow, reset-password`. `reset-password` returns a generated password **once**, drops their sessions and clears the synced envelope (it was wrapped with the old one). Admins are never a target and you cannot act on yourself |
 | POST | `/api/admin/guests` | clears every guest session (admin) |
 | POST | `/api/admin/purge` | `{room}` (admin) — shreds that room's stored ciphertext now, disk and memory |
 
@@ -103,6 +110,14 @@ guest sessions, 240 API calls. Ciphertext is capped at `maxMsgBytes` (128 KB def
 
 - **Never use `t` twice in one frame object.** `JSON.stringify` keeps the last one, so a client
   reading `m.t` as a type would silently drop every frame. Timestamps are nested or renamed.
+- **The relay never ships `recipients` back.** `msg` frames and history rows carry the ciphertext
+  only; the client attempts decryption and treats failure as "sealed to an older key". Gating on a
+  recipient list the server does not send would make every received message look sealed.
+- **Attachments ride inside the message.** The `ct` of a message that has a file decrypts to
+  `{"text": "...", "file": {"id","key","iv","name","type","size","kind"}}` — the AES-GCM key is
+  inside the OpenPGP envelope, so the relay can serve the blob without ever being able to open it.
+- **`blob:` URLs need the CSP to allow them.** `img-src`/`media-src` must include `blob:`, or
+  decrypted pictures and video render as a broken image even though the bytes arrived.
 - `[hidden]` must stay `display:none !important` in the stylesheet, or dismissed banners,
   dividers and sheets stay visible.
 - A `403` may carry `{banned: true}` — the UI shows the ban reason instead of a generic failure.

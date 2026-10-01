@@ -39,7 +39,7 @@ const COOKIE_SECURE = /^https:/i.test(PUBLIC_URL);
 const SESSION_COOKIE_MAX_AGE = 30 * 24 * 3600;
 
 const log = (...a) => console.log(JSON.stringify({ ts: new Date().toISOString(), msg: a.join(' ') }));
-const settings = new Settings(DATA);
+const settings = new Settings(DATA, CFG);
 const auth = new Auth(DATA, CFG.auth || {});
 const rooms = new Rooms(DATA, settings);
 const chat = new Chat(DATA, CFG);
@@ -140,8 +140,11 @@ function meView(session) {
     createdAt: session.createdAt,
   };
 }
-function banFor(actor, roomId = null) {
-  return auth.banFor({ username: actor.kind === 'account' ? actor.username : null, fp: actor.fp || null, room: roomId });
+function banFor(actor, roomId = null, opts = {}) {
+  return auth.banFor({
+    username: actor.kind === 'account' ? actor.username : null,
+    fp: actor.fp || null, ip: opts.ip || null, room: roomId, forPost: !!opts.forPost,
+  });
 }
 function setCookie(res, session) {
   res.setHeader('Set-Cookie', serializeCookie(COOKIE, session.token, {
@@ -160,7 +163,8 @@ const WS_ORIGIN = (() => {
 })();
 const secHeaders = {
   'Content-Security-Policy':
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+    "media-src 'self' blob:; font-src 'self'; " +
     `connect-src 'self'${WS_ORIGIN}; base-uri 'none'; form-action 'none'; ` +
     "frame-ancestors 'none'; object-src 'none'",
   'X-Content-Type-Options': 'nosniff',
@@ -195,9 +199,29 @@ function readJson(req) {
     req.on('error', reject);
   });
 }
+// Attachments arrive as raw bytes (they are already ciphertext — there is nothing to
+// parse). Over the cap we stop buffering but keep draining, so the client still gets a
+// clean answer instead of a reset connection.
+function readBinary(req, maxBytes) {
+  return new Promise(resolve => {
+    let n = 0;
+    let tooBig = false;
+    const chunks = [];
+    req.on('data', c => {
+      n += c.length;
+      if (n > maxBytes) { tooBig = true; chunks.length = 0; return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(tooBig
+      ? { error: `that upload is over the ${Math.round(maxBytes / 1048576)} MB cap` }
+      : (chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0))));
+    req.on('error', () => resolve({ error: 'upload interrupted' }));
+  });
+}
 const banMessage = ban => {
   const until = ban.until ? ` until ${new Date(ban.until).toISOString().slice(0, 16).replace('T', ' ')}Z` : ' permanently';
-  return `you are banned${ban.room ? ` from ${ban.room}` : ''}${until}${ban.reason ? ` — ${ban.reason}` : ''}`;
+  const what = ban.mute ? 'muted' : 'banned';
+  return `you are ${what}${ban.room ? ` in ${ban.room}` : ''}${until}${ban.reason ? ` — ${ban.reason}` : ''}`;
 };
 
 /* ---------- broadcast helpers ---------- */
@@ -225,7 +249,8 @@ function broadcastRoomState(roomId, note = null) {
   for (const c of socketsIn(roomId)) {
     const actor = actorFromSocket(c);
     const view = rooms.view(room, actor, liveFor(roomId));
-    try { c.send(JSON.stringify({ t: 'room', room: view, frozen: room.frozen, canPost: rooms.can(actor, 'post', room) })); } catch { /* ignore */ }
+    const muted = !!banFor(actor, roomId, { forPost: true, ip: c.__ip });
+    try { c.send(JSON.stringify({ t: 'room', room: view, frozen: room.frozen, muted, canPost: rooms.can(actor, 'post', room) && !muted })); } catch { /* ignore */ }
   }
 }
 function actorFromSocket(ws) {
@@ -323,7 +348,7 @@ function applyFlair(username, rainbow) {
 }
 
 function broadcastSettings() {
-  const payload = JSON.stringify({ t: 'settings', settings: settings.publicView() });
+  const payload = JSON.stringify({ t: 'settings', settings: settings.publicView(), retentionHours: chat.retentionHours });
   for (const c of wss.clients) if (c.readyState === 1) { try { c.send(payload); } catch { /* ignore */ } }
 }
 
@@ -405,10 +430,16 @@ async function handleRequest(req, res) {
   }
   if (method === 'GET' && p === '/healthz') {
     const s = chat.stats();
+    const files = rooms.all().reduce((acc, r) => {
+      const f = chat.fileStats(r.id);
+      acc.count += f.count; acc.bytes += f.bytes;
+      return acc;
+    }, { count: 0, bytes: 0 });
     return send(res, 200, {
       ok: true, rooms: rooms.all().length, messages: s.messages, keys: s.keys, online: wss ? wss.clients.size : 0,
       accounts: auth.count(), sessions: auth.sessionCount(), bans: auth.activeBans().length,
-      uptime: Math.round(process.uptime()), retentionHours: chat.retentionMs / 3600000,
+      files: files.count, fileBytes: files.bytes,
+      uptime: Math.round(process.uptime()), retentionHours: chat.retentionHours,
       adminClaimable: !auth.hasAdmin(),
     });
   }
@@ -448,7 +479,7 @@ async function handleRequest(req, res) {
       const b = await readJson(req);
       const rec = auth.verify(b.username, b.password);
       if (!rec) { event('login-failed', { username: String(b.username || '').slice(0, 24), ip }); return fail(res, 401, 'wrong username or password'); }
-      const ban = auth.banFor({ username: rec.username });
+      const ban = auth.banFor({ username: rec.username, ip });
       if (ban) return send(res, 403, { error: banMessage(ban), banned: true, until: ban.until });
       rec.lastLogin = now();
       const session = auth.createSession({ kind: 'account', username: rec.username, handle: rec.username, role: rec.role, ip });
@@ -510,7 +541,8 @@ async function handleRequest(req, res) {
       if (!HANDLE_RE.test(handle)) return fail(res, 400, 'handle must be 2-24 chars: a-z, 0-9 or -');
       const fp = String(b.fp || '').toLowerCase();
       if (fp && !FP_RE.test(fp)) return fail(res, 400, 'bad fingerprint');
-      if (fp && auth.banFor({ fp })) return send(res, 403, { error: 'this device is banned', banned: true });
+      if (fp && auth.banFor({ fp, ip })) return send(res, 403, { error: 'this device is banned', banned: true });
+      if (!fp && settings.data.guestAccess !== false && auth.banFor({ ip })) return send(res, 403, { error: 'this address is banned', banned: true });
       const old = sessionFrom(req);
       if (old && old.kind === 'guest') auth.destroySession(old.token);
       const session = auth.createSession({ kind: 'guest', handle, role: 'guest', fp: fp || null, ip });
@@ -531,7 +563,8 @@ async function handleRequest(req, res) {
         me: meView(session),
         settings: settings.publicView(),
         claimable: !auth.hasAdmin(),
-        retentionHours: chat.retentionMs / 3600000,
+        retentionHours: chat.retentionHours,
+        maxFileBytes: chat.maxFileBytes,
         serverTime: now(),
         flair: auth.flairMap(),
         rooms: rooms.list(actor, liveFor),
@@ -581,7 +614,26 @@ async function handleRequest(req, res) {
       return send(res, 201, { ok: true, room: rooms.view(rooms.get(r.room.id), actor, liveFor(r.room.id)) });
     }
 
-    const roomMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})(?:\/(join|leave|state|keys|pool|history|members))?$/);
+    const fileMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})\/files\/([a-z0-9]{8,32})$/);
+    if (fileMatch) {
+      const roomId = fileMatch[1];
+      const fileId = fileMatch[2];
+      const room = rooms.get(roomId);
+      if (!room) return fail(res, 404, 'no such room');
+      if (method !== 'GET' && method !== 'HEAD') return fail(res, 405, 'not allowed');
+      if (!rooms.can(actor, 'read', room)) return fail(res, 403, 'not allowed');
+      if (!chat.hasFile(roomId, fileId)) return fail(res, 404, 'that attachment is gone');
+      const full = chat.filePath(roomId, fileId);
+      const size = fs.statSync(full).size;
+      res.writeHead(200, {
+        ...secHeaders, 'Content-Type': 'application/octet-stream', 'Content-Length': size,
+        'Cache-Control': 'no-store', 'Content-Disposition': 'attachment',
+      });
+      if (method === 'HEAD') return res.end();
+      return fs.createReadStream(full).pipe(res);
+    }
+
+    const roomMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})(?:\/(join|leave|state|keys|pool|history|members|files))?$/);
     if (roomMatch) {
       const roomId = roomMatch[1];
       const sub = roomMatch[2] || '';
@@ -666,7 +718,7 @@ async function handleRequest(req, res) {
       if (sub === 'pool' && method === 'GET') {
         if (!rooms.can(actor, 'read', room)) return fail(res, 403, 'not allowed');
         return send(res, 200, {
-          serverTime: now(), retentionHours: chat.retentionMs / 3600000, room: roomId,
+          serverTime: now(), retentionHours: chat.retentionHours, room: roomId,
           frozen: room.frozen, private: room.private,
           keys: chat.keys(roomId),
         });
@@ -679,12 +731,36 @@ async function handleRequest(req, res) {
         const b = await readJson(req);
         return registerRoomKey({ roomId, body: b, session, actor, res });
       }
+      if (sub === 'files' && method === 'POST') {
+        if (!rateOk(ip, 'files', (CFG.rate && CFG.rate.filesPerMin) || 10)) return fail(res, 429, 'slow down');
+        const postBan = banFor(actor, roomId, { ip, forPost: true });
+        if (postBan) return send(res, 403, { error: banMessage(postBan), banned: true });
+        if (!rooms.can(actor, 'post', room)) return fail(res, 403, room.frozen ? 'this room is frozen' : 'you cannot post in this room');
+        // Two gates, both default off: the site switch for this kind of content, and the
+        // room's own switch. The relay cannot inspect ciphertext, so the sender's declared
+        // kind is what gets checked — this is a policy control for honest clients, not a
+        // content firewall (there is nothing to filter: the bytes are sealed).
+        const kind = String(req.headers['x-content-kind'] || 'file').toLowerCase();
+        if (!['image', 'video', 'file'].includes(kind)) return fail(res, 400, 'unknown content kind');
+        if (!settings.allowsKind(kind)) return fail(res, 403, kind === 'file' ? 'attachments are switched off site-wide' : `${kind}s are switched off site-wide`);
+        if (!room.allowFiles) return fail(res, 403, 'attachments are switched off in this room');
+        // Refuse an oversize body before reading a single byte of it.
+        const declared = Number(req.headers['content-length'] || 0);
+        if (declared > chat.maxFileBytes) return fail(res, 413, `that upload is over the ${Math.round(chat.maxFileBytes / 1048576)} MB cap`);
+        const body = await readBinary(req, chat.maxFileBytes);
+        if (body.error) return fail(res, 413, body.error);
+        const r = chat.addFile(roomId, { id: crypto.randomUUID().replace(/-/g, ''), data: body });
+        if (r.error) return fail(res, 400, r.error);
+        event('file', { room: roomId, by: actor.username || actor.handle, kind, bytes: r.size });
+        log('file', roomId, kind, `${Math.round(r.size / 1024)}kb`);
+        return send(res, 201, { ok: true, id: r.id, size: r.size });
+      }
       if (sub === 'history' && method === 'GET') {
         if (!rooms.can(actor, 'read', room)) return fail(res, 403, 'not allowed');
         const fp = (url.searchParams.get('fp') || '').toLowerCase();
         if (!FP_RE.test(fp)) return fail(res, 400, 'bad fp');
         const h = chat.history(roomId, fp, clampInt(url.searchParams.get('limit'), 1, 2000, chat.historyLimit));
-        return send(res, 200, { ...h, room: roomId, retentionHours: chat.retentionMs / 3600000, serverTime: now(), frozen: room.frozen });
+        return send(res, 200, { ...h, room: roomId, retentionHours: chat.retentionHours, serverTime: now(), frozen: room.frozen });
       }
     }
 
@@ -693,7 +769,7 @@ async function handleRequest(req, res) {
       const roomId = String(url.searchParams.get('room') || LOUNGE_ID);
       const room = rooms.get(roomId);
       if (!room || !rooms.can(actor, 'read', room)) return fail(res, 403, 'not allowed');
-      return send(res, 200, { serverTime: now(), retentionHours: chat.retentionMs / 3600000, room: roomId, keys: chat.keys(roomId) });
+      return send(res, 200, { serverTime: now(), retentionHours: chat.retentionHours, room: roomId, keys: chat.keys(roomId) });
     }
     if (method === 'POST' && p === '/api/keys') {
       const b = await readJson(req);
@@ -713,16 +789,17 @@ async function handleRequest(req, res) {
       const fp = (url.searchParams.get('fp') || '').toLowerCase();
       if (!FP_RE.test(fp)) return fail(res, 400, 'bad fp');
       const h = chat.history(roomId, fp, clampInt(url.searchParams.get('limit'), 1, 2000, chat.historyLimit));
-      return send(res, 200, { ...h, room: roomId, retentionHours: chat.retentionMs / 3600000, serverTime: now(), frozen: room.frozen });
+      return send(res, 200, { ...h, room: roomId, retentionHours: chat.retentionHours, serverTime: now(), frozen: room.frozen });
     }
 
     /* ---- moderation ---- */
     if (method === 'POST' && p === '/api/mod/ban') {
       const b = await readJson(req);
       const roomId = b.room ? String(b.room) : null;
-      let kind = b.kind === 'fp' ? 'fp' : 'account';
+      let kind = ['fp', 'ip'].includes(b.kind) ? b.kind : 'account';
       const target = String(b.target || '').toLowerCase().trim();
       if (!target) return fail(res, 400, 'no target');
+      if (kind === 'ip' && (RANK[actor.role] ?? 0) < RANK.admin) return fail(res, 403, 'only an admin bans by address');
       if (auth.banFor({ username: actor.kind === 'account' ? actor.username : null, fp: actor.fp || null, room: roomId })) return fail(res, 403, 'you are banned');
       // permission + target rank
       if (roomId) {
@@ -738,13 +815,20 @@ async function handleRequest(req, res) {
       } else if (!FP_RE.test(target)) return fail(res, 400, 'bad fingerprint');
 
       const hours = b.hours == null ? null : clampInt(b.hours, 1, 720, null);
-      const r = auth.addBan({ kind, target, room: roomId, until: hours ? now() + hours * 3600e3 : null, reason: b.reason, by: actor.username || actor.handle });
+      const mute = !!b.mute;      // a timeout: they keep reading, they just cannot post
+      const r = auth.addBan({ kind, target, room: roomId, until: hours ? now() + hours * 3600e3 : null, reason: b.reason, by: actor.username || actor.handle, mute });
       if (r.error) return fail(res, 400, r.error);
-      event('ban', { kind, target, room: roomId, hours, reason: String(b.reason || '').slice(0, 120), by: actor.username || actor.handle });
-      log('ban', kind, target, roomId || 'site-wide', hours ? `${hours}h` : 'permanent');
-      const kicked = kickSockets(c => (kind === 'account' ? c.__username === target : c.__fp === target) && (!roomId || c.__room === roomId), banMessage(r.ban));
-      if (roomId) broadcastRoomState(roomId, `${target} was banned from this room`);
-      return send(res, 200, { ok: true, ban: r.ban, kicked });
+      event('ban', { kind, target, room: roomId, hours, mute, reason: String(b.reason || '').slice(0, 120), by: actor.username || actor.handle });
+      log(mute ? 'mute' : 'ban', kind, target, roomId || 'site-wide', hours ? `${hours}h` : 'permanent');
+      let kicked = 0;
+      if (!mute) kicked = kickSockets(c => (kind === 'account' ? c.__username === target : kind === 'fp' ? c.__fp === target : false) && (!roomId || c.__room === roomId), banMessage(r.ban));
+      if (roomId) broadcastRoomState(roomId, mute ? `${target} was muted in this room` : `${target} was banned from this room`);
+      if (mute) {
+        // A muted account is still connected, so its composer has to learn about it.
+        const rec2 = auth.get(target);
+        if (rec2) refreshActorSockets(target, rec2.role);
+      }
+      return send(res, 200, { ok: true, ban: r.ban, kicked, mute });
     }
     if (method === 'POST' && p === '/api/mod/unban') {
       if ((RANK[actor.role] ?? 0) < RANK.mod) return fail(res, 403, 'not allowed');
@@ -778,25 +862,52 @@ async function handleRequest(req, res) {
         });
       }
 
+      if (method === 'GET' && p === '/api/admin/accounts/export') {
+        const rows = auth.list().map(a => JSON.stringify({
+          username: a.username, role: a.role, createdAt: a.createdAt, createdAtISO: new Date(a.createdAt).toISOString(),
+          lastLogin: a.lastLogin, lastLoginISO: a.lastLogin ? new Date(a.lastLogin).toISOString() : null,
+          keyFp: a.keyFp, syncKey: a.syncKey, rainbow: a.rainbow, sessions: a.sessions, banned: !!a.ban,
+        }));
+        return send(res, 200, rows.join('\n') + (rows.length ? '\n' : ''), {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Content-Disposition': `attachment; filename="pgp-room-accounts-${new Date().toISOString().slice(0, 10)}.jsonl"`,
+        });
+      }
+
       if (!isAdmin) return fail(res, 403, 'admin only');
 
+      if (method === 'GET' && p === '/api/admin/sessions') {
+        return send(res, 200, { sessions: auth.listSessions() });
+      }
+
       if (method === 'GET' && p === '/api/admin/overview') {
+        const fileTotals = rooms.all().reduce((acc, r) => {
+          const s = chat.fileStats(r.id);
+          acc.count += s.count; acc.bytes += s.bytes;
+          return acc;
+        }, { count: 0, bytes: 0 });
         return send(res, 200, {
           accounts: auth.list(),
           rooms: rooms.all().map(r => rooms.view(r, actor, liveFor(r.id))),
           bans: auth.activeBans(),
           settings: settings.publicView(),
           sessions: auth.sessionCount(),
+          sessionList: auth.listSessions(),
           guestSessions: [...auth.sessions.values()].filter(s => s.kind === 'guest').length,
           online: [...online.entries()].map(([room, m]) => ({ room, online: [...m.values()].map(o => o.handle) })),
           stats: chat.stats(),
-          perRoom: rooms.all().map(r => ({
-            id: r.id, name: r.name, messages: chat.countFor(r.id), keys: chat.poolSize(r.id),
-            online: roomOnline(r.id).size, frozen: !!r.frozen, slowMs: r.slowMs || 0,
-          })),
+          files: fileTotals,
+          maxFileBytes: chat.maxFileBytes,
+          perRoom: rooms.all().map(r => {
+            const s = chat.roomStats(r.id);
+            return {
+              id: r.id, name: r.name, messages: s.messages, keys: s.keys, files: s.files, fileBytes: s.fileBytes,
+              online: roomOnline(r.id).size, frozen: !!r.frozen, slowMs: r.slowMs || 0, owner: r.owner || null,
+            };
+          }),
           activity: activitySeries(7),
           flair: auth.flairMap(),
-          retentionHours: chat.retentionMs / 3600000,
+          retentionHours: chat.retentionHours,
           lockdown: !!settings.data.lockdown,
         });
       }
@@ -804,12 +915,21 @@ async function handleRequest(req, res) {
       if (method === 'PATCH' || method === 'POST') {
         const b = await readJson(req);
         if (p === '/api/admin/settings') {
+          const beforeMs = chat.retentionMs;
           const r = settings.patch(b, actor.role);
           if (r.error) return fail(res, 403, r.error);
-          event('settings', { by: actor.username, ...settings.publicView() });
+          // Retention is policy now: shortening it takes effect at once, and the shredder
+          // runs immediately so "24h instead of 48h" actually deletes the extra day.
+          const afterMs = settings.retentionMs();
+          if (afterMs !== beforeMs) {
+            chat.setRetentionMs(afterMs);
+            const swept = sweep();
+            log('retention-change', `${beforeMs}->${afterMs}`, `rows=${swept.expiredDisk}`, `files=${swept.expiredFiles}`, `mem=${swept.expiredMemory}`);
+          }
+          event('settings', { by: actor.username, ...settings.publicView(), retentionHours: chat.retentionHours });
           log('settings', JSON.stringify(settings.publicView()));
           broadcastSettings();
-          return send(res, 200, { ok: true, settings: r.settings });
+          return send(res, 200, { ok: true, settings: r.settings, retentionHours: chat.retentionHours });
         }
         if (p === '/api/admin/role') {
           const target = String(b.username || '').toLowerCase();
@@ -887,6 +1007,19 @@ async function handleRequest(req, res) {
             log('account-op', op, target, `sessions=${sessions}`);
             return send(res, 200, { ok: true, sessions, sockets });
           }
+          if (op === 'reset-password') {
+            // The new password is generated here, handed to the admin once, and never
+            // logged. The synced envelope is dropped: it was wrapped with the old one.
+            const temp = crypto.randomBytes(10).toString('base64url');
+            const r = auth.setPassword(target, temp);
+            if (r.error) return fail(res, 400, r.error);
+            auth.setSyncKey(target, false);
+            const sessions = auth.dropSessionsFor(target);
+            const sockets = kickSockets(c => c.__username === target, 'password reset by an admin');
+            event('account-op', { op, target, by: actor.username, sessions, sockets });
+            log('account-op', op, target, `sessions=${sessions}`);
+            return send(res, 200, { ok: true, password: temp, sessions, sockets });
+          }
           if (op === 'delete') {
             // Hand over anything they owned so rooms are never orphaned.
             const took = [];
@@ -908,6 +1041,17 @@ async function handleRequest(req, res) {
           return fail(res, 400, 'unknown op');
         }
 
+        if (p === '/api/admin/sessions') {
+          const id = String(b.id || '').toLowerCase();
+          if (!id) return fail(res, 400, 'no session id');
+          const r = auth.revokeSession(id);
+          if (r.error) return fail(res, 404, r.error);
+          const sockets = kickSockets(c => c.__tok === r.session.token, 'session revoked by an admin');
+          event('account-op', { op: 'revoke-session', target: r.session.username || r.session.handle || 'guest', by: actor.username, sockets });
+          log('session-revoked', id, `sockets=${sockets}`);
+          return send(res, 200, { ok: true, sockets });
+        }
+
         // Clear every anonymous guest session in one move.
         if (p === '/api/admin/guests') {
           let sessions = 0;
@@ -924,10 +1068,46 @@ async function handleRequest(req, res) {
           const roomId = String(b.room || '');
           if (!rooms.get(roomId)) return fail(res, 404, 'no such room');
           const r = chat.purge(roomId);
-          event('room-purge', { room: roomId, by: actor.username, rows: r.purgedRows, files: r.purgedFiles });
-          log('room-purge', roomId, `rows=${r.purgedRows}`);
+          event('room-purge', { room: roomId, by: actor.username, rows: r.purgedRows, files: r.purgedFiles, blobs: r.purgedBlobs });
+          log('room-purge', roomId, `rows=${r.purgedRows}`, `blobs=${r.purgedBlobs}`);
           broadcastRoomState(roomId, 'the relay cleared this room’s stored ciphertext');
           return send(res, 200, { ok: true, ...r });
+        }
+
+        // Room ownership and clearing a room out in one move.
+        if (p === '/api/admin/room') {
+          const roomId = String(b.room || '');
+          const room = rooms.get(roomId);
+          if (!room) return fail(res, 404, 'no such room');
+          const op = String(b.op || '');
+          if (op === 'owner') {
+            const who = b.username ? String(b.username).toLowerCase() : actor.username;
+            const rec = auth.get(who);
+            if (!rec) return fail(res, 404, 'no such account');
+            room.owner = rec.username;
+            room.members = [...new Set([...room.members, rec.username])];
+            rooms.saveNow();
+            event('room-owner', { room: roomId, owner: rec.username, by: actor.username });
+            log('room-owner', roomId, rec.username);
+            broadcastRoomState(roomId, `${rec.username} now owns this room`);
+            return send(res, 200, { ok: true, owner: rec.username });
+          }
+          if (op === 'kickall') {
+            const sockets = kickSockets(c => c.__room === roomId, 'an admin cleared the room');
+            event('room-kickall', { room: roomId, by: actor.username, sockets });
+            log('room-kickall', roomId, `sockets=${sockets}`);
+            return send(res, 200, { ok: true, sockets });
+          }
+          return fail(res, 400, 'unknown op');
+        }
+
+        // Lift every ban at once.
+        if (p === '/api/admin/bans') {
+          const r = auth.clearBans();
+          event('unban', { by: actor.username, all: true, removed: r.removed });
+          log('bans-cleared', `removed=${r.removed}`);
+          for (const room of rooms.all()) broadcastRoomState(room.id);
+          return send(res, 200, { ok: true, removed: r.removed });
         }
       }
       return fail(res, 404, 'not found');
@@ -973,8 +1153,9 @@ function refreshActorSockets(username, role) {
     if (!room) continue;
     const actor = actorFromSocket(c);
     if (actor.username !== username && !rooms.can(actor, 'view', room)) { c.close(1008, 'no longer allowed'); continue; }
+    const muted = !!banFor(actor, room.id, { forPost: true, ip: c.__ip });
     try {
-      c.send(JSON.stringify({ t: 'room', room: rooms.view(room, actor, liveFor(room.id)), frozen: room.frozen, canPost: rooms.can(actor, 'post', room) }));
+      c.send(JSON.stringify({ t: 'room', room: rooms.view(room, actor, liveFor(room.id)), frozen: room.frozen, muted, canPost: rooms.can(actor, 'post', room) && !muted }));
     } catch { /* ignore */ }
   }
 }
@@ -996,6 +1177,7 @@ wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.__room = null;
   ws.__fp = null;
+  ws.__ip = ip;
   const helloTimer = setTimeout(() => { if (!ws.__room) ws.close(1008, 'no hello'); }, 12000);
   if (helloTimer.unref) helloTimer.unref();
 
@@ -1014,7 +1196,7 @@ wss.on('connection', (ws, req) => {
       const roomId = String(m.room || LOUNGE_ID).toLowerCase();
       const room = rooms.get(roomId);
       if (!room) { ws.send(JSON.stringify({ t: 'err', msg: 'no such room' })); ws.close(1008, 'no such room'); return; }
-      const ban = banFor(actor, roomId);
+      const ban = banFor(actor, roomId, { ip });
       if (ban) { ws.send(JSON.stringify({ t: 'kick', reason: banMessage(ban) })); ws.close(1008, 'banned'); return; }
       if (!rooms.can(actor, 'read', room)) { ws.send(JSON.stringify({ t: 'err', msg: 'not allowed in this room' })); ws.close(1008, 'not allowed'); return; }
       if (!rooms.can(actor, 'join', room)) { ws.send(JSON.stringify({ t: 'err', msg: 'this room is locked' })); ws.close(1008, 'locked'); return; }
@@ -1038,12 +1220,14 @@ wss.on('connection', (ws, req) => {
       chat.touchKey(roomId, fp);
       joinPresence(ws, roomId, { ...actor, fp, handle });
       const view = rooms.view(room, actor, liveFor(roomId));
+      const muted = !!banFor(actor, roomId, { forPost: true, ip });
       ws.send(JSON.stringify({
         t: 'welcome',
         you: { fp, handle, kind: actor.kind, username: actor.username, role: actor.role, joinedAt: (chat.pool(roomId).get(fp) || {}).joinedAt || null },
         room: view, online: roomOnlineList(roomId), poolSize: chat.poolSize(roomId),
-        serverTime: now(), retentionHours: chat.retentionMs / 3600000, frozen: room.frozen,
-        canPost: rooms.can(actor, 'post', room),
+        serverTime: now(), retentionHours: chat.retentionHours, frozen: room.frozen,
+        muted,
+        canPost: rooms.can(actor, 'post', room) && !muted,
       }));
       return;
     }
@@ -1055,7 +1239,11 @@ wss.on('connection', (ws, req) => {
       if (!room) return;
       const actor = actorFromSocket(ws);
       if (!rateOk(ip, 'msgs', (CFG.rate && CFG.rate.msgsPerMin) || 25)) { ws.send(JSON.stringify({ t: 'err', msg: 'rate limit — slow down' })); return; }
-      if (banFor(actor, roomId)) { ws.send(JSON.stringify({ t: 'kick', reason: 'you are banned' })); ws.close(1008, 'banned'); return; }
+      const postBan = banFor(actor, roomId, { forPost: true, ip: ws.__ip });
+      if (postBan) {
+        if (postBan.mute) { ws.send(JSON.stringify({ t: 'err', msg: banMessage(postBan) })); return; }
+        ws.send(JSON.stringify({ t: 'kick', reason: 'you are banned' })); ws.close(1008, 'banned'); return;
+      }
       if (!rooms.can(actor, 'post', room)) {
         ws.send(JSON.stringify({ t: 'err', msg: room.frozen ? 'this room is frozen' : 'you cannot post in this room' }));
         return;
@@ -1103,7 +1291,7 @@ wss.on('connection', (ws, req) => {
       ws.send(JSON.stringify({
         t: 'welcome', you: { fp: ws.__fp, handle: ws.__handle, kind: actor.kind, username: actor.username, role: actor.role },
         room: view, online: roomOnlineList(roomId), poolSize: chat.poolSize(roomId), serverTime: now(),
-        retentionHours: chat.retentionMs / 3600000, frozen: room.frozen, canPost: rooms.can(actor, 'post', room),
+        retentionHours: chat.retentionHours, frozen: room.frozen, canPost: rooms.can(actor, 'post', room),
       }));
       return;
     }
@@ -1136,7 +1324,13 @@ function load() {
   const migrated = chat.migrateLegacy(LOUNGE_ID);
   if (fs.existsSync(LEGACY_MSG_FILE)) { try { fs.renameSync(LEGACY_MSG_FILE, `${LEGACY_MSG_FILE}.migrated`); } catch { /* leave it */ } }
   const c = chat.load(rooms.all().map(x => x.id));
-  for (const room of rooms.all()) fs.mkdirSync(chat.msgDir(room.id), { recursive: true });
+  // How long ciphertext lives is policy (settings.json), not a constant: config.json is
+  // only the fallback for a relay where nobody has touched the panel yet.
+  chat.setRetentionMs(settings.retentionMs());
+  for (const room of rooms.all()) {
+    fs.mkdirSync(chat.msgDir(room.id), { recursive: true });
+    fs.mkdirSync(chat.filesDir(room.id), { recursive: true });
+  }
 
   // Bootstrap: while no admin exists, keep a one-shot claim code on hand as the
   // fallback way to seat one. It is written to settings.json and emitted as an event
@@ -1149,8 +1343,9 @@ function load() {
   }
   log('loaded',
     `rooms=${r.rooms}`, `accounts=${a.accounts}`, `sessions=${a.sessions}`, `bans=${a.bans}`,
-    `keys=${c ? Object.values(c).reduce((n, x) => n + x.keys, 0) : 0}`, `ttl=${chat.retentionMs / 3600000}h`,
-    `migrated=${migrated.join('+') || 'none'}`, `guestAccess=${s.guestAccess}`, `admin=${auth.hasAdmin()}`);
+    `keys=${c ? Object.values(c).reduce((n, x) => n + x.keys, 0) : 0}`, `ttl=${chat.retentionHours == null ? 'forever' : `${chat.retentionHours}h`}`,
+    `migrated=${migrated.join('+') || 'none'}`, `guestAccess=${s.guestAccess}`, `admin=${auth.hasAdmin()}`,
+    `uploads=${['images', 'video', 'files'].filter(k => settings.filePolicy()[k === 'images' ? 'images' : k]).join(',') || 'off'}`);
 }
 
 function shutdown(sig) {
@@ -1175,7 +1370,9 @@ setInterval(() => {
 
 function sweep() {
   const r = chat.cleanup();
-  if (r.expiredDisk || r.expiredMemory) log('retention-sweep', `expired_disk=${r.expiredDisk}`, `expired_memory=${r.expiredMemory}`);
+  if (r.expiredDisk || r.expiredMemory || r.expiredFiles) {
+    log('retention-sweep', `expired_disk=${r.expiredDisk}`, `expired_memory=${r.expiredMemory}`, `expired_files=${r.expiredFiles}`);
+  }
   return r;
 }
 

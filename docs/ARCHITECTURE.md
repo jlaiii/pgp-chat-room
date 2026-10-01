@@ -30,7 +30,7 @@ hash never touches a message and cannot decrypt anything.
 | `lib/util.js` | atomic writes, secure erase, cookies, ids/handles, regexes |
 | `lib/auth.js` | accounts (scrypt), sessions (30-day tokens), roles, bans (site-wide and per-room) |
 | `lib/rooms.js` | room registry, membership, `can(actor, action, room)` — **all permissions live here** so HTTP and WS cannot drift |
-| `lib/chat.js` | per-room key pools, per-room per-day ciphertext segments, retention shredder, room teardown |
+| `lib/chat.js` | per-room key pools, per-room per-day ciphertext segments, sealed attachment blobs, retention shredder (rows and files), room teardown |
 | `lib/settings.js` | the site policy the admin panel flips (new rooms, guests, signups, lockdown, notice board) plus the bootstrap claim code |
 | `public/identity.js` | browser keypair, localStorage layout, backup/restore, password-wrapped envelope |
 | `public/app.js` | client state machine, API/WS clients, every view, all cryptography |
@@ -39,21 +39,27 @@ hash never touches a message and cannot decrypt anything.
 
 ```
 data/
-├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, adminClaim, createdAt}
+├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
 ├── accounts.json                 [{username, salt, hash, scryptN, role, rainbow, createdAt, lastLogin, keyFp, syncKey}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
-├── bans.json                     [{id, kind, target, room, until, reason, by, at}]
+├── bans.json                     [{id, kind: account|fp|ip, target, room, until, mute, reason, by, at}]
 ├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles, slowMs}]
-├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/purge…), streamed live to staff sockets and served by the admin panel
+├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/file/purge…), streamed live to staff sockets and served by the admin panel
 └── rooms/
     └── <roomId>/
         ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
-        └── messages/<utc-day>.jsonl   one ciphertext row per line
+        ├── messages/<utc-day>.jsonl   one ciphertext row per line
+        └── files/<id>.bin        one sealed attachment per file — bytes the relay cannot open
 ```
 
 `rainbow` and `slowMs` are cosmetic or policy fields — they never touch keys or ciphertext.
 `events.log` holds metadata only, and the one secret that ever passes through it (`admin-claim`,
 the bootstrap code) is filtered out of every API path.
+
+Attachments live beside the ciphertext they belong to and are shredded by the same sweep: a
+segment is dropped when its day ages out, a blob when its mtime does. The message that points at
+one is just JSON inside the OpenPGP envelope, so the relay stores a name it never learns and a key
+it never sees.
 
 Durability is deliberate and split: **identity and moderation writes are synchronous**
 (`saveNow()` — a lost ban is unacceptable), while high-frequency traffic (`lastSeen`, key
@@ -88,7 +94,10 @@ record on every request, so a promotion or demotion applies to **live sockets** 
 | site settings, roles | no | no | no | yes | no |
 | activity log (live audit trail) | no | no | yes (no admin rows, no IPs) | yes | no |
 | announce, lockdown, purge, guest purge | no | no | no | yes | no |
-| sign out / delete an account | no | no | no | users, mods (never an admin, never yourself) | no |
+| sign out / delete / reset a password | no | no | no | users, mods (never an admin, never yourself) | no |
+| mute (post-block, keeps their session) | no | room owner | room mod | yes | yes |
+| ban by IP address | no | no | no | yes | no |
+| upload / download an attachment | no | yes, if the site kind switch and the room switch are on | same | yes | yes |
 | slow mode (per-room floor) | no | room owner | room mod | yes | yes |
 
 Two consequences worth knowing:

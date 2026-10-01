@@ -25,8 +25,28 @@ change from the single-room build, and it is worth being precise about:
 | the audit trail in `events.log`: joins, leaves, key registrations, moderation actions, sign-in attempts | accountability — the whole point of moving presence out of a chat app and onto the site | an activity timeline. IPs are stored on auth events and served to admins only; mods get the same rows without them |
 | message metadata (id, seq, time, room, author handle + fingerprint, recipient fingerprints) | delivery and history | a social graph and timing pattern |
 | sync envelope (optional) | multi-device | an AES-GCM blob; useless without the password |
+| attachment blobs (ciphertext, with size and timestamp) | file transfer through a relay that cannot read it | how many bytes were sent, when, and by whom — never what they are |
 
 None of that reveals a single message body.
+
+## Attachments
+
+A file is encrypted in the browser with a one-off AES-256-GCM key and uploaded as opaque bytes;
+that key is put inside the same OpenPGP message as the caption, addressed to the room's pool. The
+relay therefore stores a blob it cannot open, serves it back to anyone who may read the room, and
+never learns the filename (it travels inside the envelope too).
+
+Two things to be honest about:
+
+- **The content switches are policy, not a filter.** The sender declares `image` / `video` / `file`
+  in a header, because the relay cannot inspect sealed bytes. An adversarial client can mislabel
+  what it uploads; what it cannot do is get the relay to store anything readable.
+- **An attachment expires with the window.** Retention shreds the rows and the blobs together, so a
+  message can outlive the bytes it points at. The UI says "this attachment is gone" in that case —
+  which is the feature working, not a bug.
+
+The CSP allows `blob:` for `img-src`/`media-src` (that is how a decrypted picture is displayed from
+memory) and nothing else: no inline script, no external origins, no `object-src`.
 
 ## Password handling and key sync
 
@@ -35,9 +55,11 @@ None of that reveals a single message body.
 - An unknown username still performs a scrypt derivation, so the response time does not disclose
   whether an account exists.
 - Changing a password invalidates that account's other sessions and re-wraps the synced envelope.
-- **Key sync is opt-in and deliberately weak-by-design-dangerous:** the private key is encrypted in
+- **Key sync is on by default and deliberately weak-by-design-dangerous:** the private key is encrypted in
   the browser with PBKDF2(SHA-256, 250 000 rounds) → AES-256-GCM, and the server stores the
-  envelope. The server never receives the password, so it cannot open it — but a weak password can
+  envelope. The client wraps it at sign-in or registration with the password you just typed — it never
+  overwrites an existing envelope, and the switch in *Account* turns it off. The server never receives
+  the password, so it cannot open the envelope — but a weak password can
   be attacked offline against a stolen envelope. The UI says so, and prompts to keep a backup file
   as well. Password sync is a convenience layer; the backup file is the real recovery path.
 

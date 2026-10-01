@@ -7,7 +7,7 @@
 <meta name="description" content="End-to-end encrypted chat rooms. The server stores ciphertext it cannot read.">
 <title>PGP Room</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236c8cff' d='M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=7">
+<link rel="stylesheet" href="/style.css?v=8">
 </head>
 <body>
 
@@ -102,7 +102,13 @@
 
   <div class="frozen-bar" id="frozenBar" hidden>This room is frozen — only moderators can post right now.</div>
 
+  <div class="attach-chip" id="attachChip" hidden></div>
+
   <footer class="composer">
+    <button class="icon-btn attach" id="attachBtn" type="button" aria-label="Attach a file" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5v9.75a4.75 4.75 0 0 1-9.5 0V6.5a3.25 3.25 0 1 1 6.5 0v9.25a1.75 1.75 0 0 1-3.5 0V7h1.5v8.75a.25.25 0 0 0 .5 0V6.5a1.75 1.75 0 0 0-3.5 0v9.75a3.25 3.25 0 1 0 6.5 0V6.5h1.5Z"/></svg>
+    </button>
+    <input type="file" id="attachInput" hidden>
     <textarea id="input" rows="1" autocomplete="off" autocapitalize="sentences" enterkeyhint="send" placeholder="Message — encrypted on this device"></textarea>
     <button class="send" id="sendBtn" type="button" aria-label="Send" disabled>
       <svg viewBox="0 0 24 24"><path d="M3 20.5 21 12 3 3.5v6.6l11 1.9-11 1.9z"/></svg>
@@ -264,6 +270,6 @@
 
 <script src="/vendor/openpgp.min.js?v=1"></script>
 <script src="/identity.js?v=2"></script>
-<script src="/app.js?v=9"></script>
+<script src="/app.js?v=11"></script>
 </body>
 </html>

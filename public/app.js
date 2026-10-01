@@ -38,7 +38,8 @@
     msgs: [], online: [], ws: null, wsRetry: 0, canPost: false, frozen: false,
     settings: { allowNewRooms: true, guestAccess: true, allowRegistration: true, motd: '' },
     claimable: false, ttlMs: 48 * 3600e3,
-    lastAuthor: null, authMode: 'login',
+    lastAuthor: null, authMode: 'login', muted: false,
+    maxFileBytes: 0, lastReset: null,
     flair: {}, adminTab: 'overview', adminData: null, activity: [], activityHasMore: false, eventFilter: '',
   };
 
@@ -99,6 +100,12 @@
     return new Date(t).toLocaleDateString();
   }
   const fmtWhen = t => new Date(t).toLocaleString();
+  // Attachments and retention are policy the server publishes, so the client never
+  // hardcodes a window or a size cap.
+  const fmtBytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  const ttlFrom = hours => (hours == null ? null : hours * 3600000);
+  const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   function fmtWindow(ms) {
     const h = ms / 3600000;
     if (h < 1) return `${Math.round(ms / 60000)} minutes`;
@@ -229,7 +236,8 @@
     state.settings = meResp.settings;
     state.claimable = meResp.claimable;
     state.flair = meResp.flair || {};
-    state.ttlMs = meResp.retentionHours * 3600000;
+    state.maxFileBytes = meResp.maxFileBytes || 0;
+    state.ttlMs = ttlFrom(meResp.retentionHours);
     return meResp;
   }
 
@@ -259,7 +267,8 @@
     state.settings = meResp.settings;
     state.claimable = meResp.claimable;
     state.flair = meResp.flair || {};
-    state.ttlMs = meResp.retentionHours * 3600000;
+    state.maxFileBytes = meResp.maxFileBytes || 0;
+    state.ttlMs = ttlFrom(meResp.retentionHours);
     state.rooms = meResp.rooms;
 
     // A session with a synced key but nothing local: offer to unlock before this
@@ -437,7 +446,10 @@
   function setRoomBar() {
     const r = currentRoom();
     if (!r) return;
-    $('frozenBar').hidden = !r.frozen;
+    $('frozenBar').hidden = !(r.frozen || state.muted);
+    $('frozenBar').textContent = state.muted
+      ? 'You are muted in this room — you can read, but not post, until a moderator lifts it.'
+      : 'This room is frozen — only moderators can post right now.';
     $('roomSheetBtn').hidden = !(r.canEdit || r.canApprove);
     updateComposerState();
   }
@@ -447,13 +459,19 @@
     const blocked = !state.canPost;
     input.disabled = blocked;
     $('sendBtn').disabled = blocked || !input.value.trim();
-    input.placeholder = blocked ? (state.frozen ? 'This room is frozen' : 'You cannot post in this room') : 'Message — encrypted on this device';
+    input.placeholder = blocked
+      ? (state.muted ? 'You are muted in this room' : state.frozen ? 'This room is frozen' : 'You cannot post in this room')
+      : 'Message — encrypted on this device';
+    // The attach button only exists where the relay says attachments are welcome —
+    // both the site switch and the room switch have to be on.
+    $('attachBtn').hidden = !state.canPost || !uploadsAllowed();
+    if ($('attachBtn').hidden && pendingFile) setPending(null);
   }
 
   async function refreshPool() {
     const r = await api(`/api/rooms/${state.room.id}/pool`);
     state.pool = r.keys;
-    state.ttlMs = r.retentionHours * 3600000;
+    state.ttlMs = ttlFrom(r.retentionHours);
     state.poolKeys = new Map();
     for (const k of state.pool) {
       try { state.poolKeys.set(k.fp, await openpgp.readKey({ armoredKey: k.publicKey })); } catch { /* unusable key */ }
@@ -493,15 +511,141 @@
   }
 
   async function decryptFrom(m) {
-    if (!m.recipients || !m.recipients.includes(state.id.fp)) return null;
+    // Live frames and history rows carry no recipient list — the relay only needs it to
+    // route, and shipping it would hand every member the fingerprint set of each message.
+    // So: try to open it, and let a failure mean "sealed to a key that was never told
+    // about you", which is exactly what that state is.
+    if (Array.isArray(m.recipients) && !m.recipients.includes(state.id.fp)) return null;
     try {
       const message = await openpgp.readMessage({ armoredMessage: m.ct });
       const options = { message, decryptionKeys: state.id.privateKey, format: 'utf8' };
       const senderKey = state.poolKeys.get(m.fp);
       if (senderKey) options.verificationKeys = senderKey;
       const { data } = await openpgp.decrypt(options);
-      return { text: typeof data === 'string' ? data : String(data) };
+      return parsePayload(typeof data === 'string' ? data : String(data));
     } catch { return null; }
+  }
+
+  /* ---------------- attachments ---------------- */
+
+  // A file is sealed here, in the browser, with a one-off AES-GCM key. Only the sealed
+  // bytes go to the relay; the key travels inside the room's OpenPGP message, addressed
+  // to the same recipients as the text. So the relay stores a blob it cannot open and
+  // still cannot read a byte of it, and the filename never leaves this device.
+  let pendingFile = null;
+
+  const kindOf = file => {
+    const t = String(file.type || '').toLowerCase();
+    if (t.startsWith('image/')) return 'image';
+    if (t.startsWith('video/')) return 'video';
+    return 'file';
+  };
+  const uploadsAllowed = () => {
+    const s = state.settings || {};
+    const r = currentRoom();
+    return !!(r && r.allowFiles && (s.allowImages || s.allowVideo || s.allowFiles));
+  };
+  const allowedKinds = () => {
+    const s = state.settings || {};
+    return { image: !!s.allowImages, video: !!s.allowVideo, file: !!s.allowFiles };
+  };
+
+  function setPending(f) {
+    pendingFile = f;
+    const chip = $('attachChip');
+    chip.innerHTML = '';
+    chip.hidden = !f;
+    if (!f) return;
+    chip.append(el('span', 'chip', f.name), el('span', 'chip', fmtBytes(f.size)), el('span', 'chip', f.kind));
+    const drop = el('button', 'btn sm', 'Remove');
+    drop.onclick = () => setPending(null);
+    chip.append(drop);
+  }
+
+  function pickFile() {
+    const kinds = allowedKinds();
+    const accept = [];
+    if (kinds.image) accept.push('image/*');
+    if (kinds.video) accept.push('video/*');
+    if (kinds.file) accept.push('*/*');
+    const input = $('attachInput');
+    input.accept = accept.join(',') || '';
+    input.click();
+  }
+
+  async function sealFile(file) {
+    const raw = new Uint8Array(await file.arrayBuffer());
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, raw);
+    return { bytes: new Uint8Array(cipher), key: b64(await crypto.subtle.exportKey('raw', key)), iv: b64(iv) };
+  }
+
+  async function openFile(desc, cipherBuf) {
+    const key = await crypto.subtle.importKey('raw', unb64(desc.key), { name: 'AES-GCM' }, false, ['decrypt']);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(desc.iv) }, key, cipherBuf);
+    return new Blob([plain], { type: desc.type || 'application/octet-stream' });
+  }
+
+  function attachmentEl(desc, roomId) {
+    const wrap = el('div', 'attach');
+    wrap.append(el('div', 'attach-note', `${desc.name || 'file'} · ${fmtBytes(desc.size || 0)}`));
+    const slot = el('div');
+    const open = el('button', 'btn sm', desc.kind === 'video' ? 'Load video' : desc.kind === 'image' ? 'Open picture' : 'Download file');
+    let done = false;
+    const load = async () => {
+      if (done) return;
+      open.disabled = true;
+      open.textContent = 'Fetching…';
+      try {
+        const res = await fetch(`/api/rooms/${roomId}/files/${desc.id}`, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(res.status === 404 ? 'this attachment is gone — it followed the retention window' : `HTTP ${res.status}`);
+        const blob = await openFile(desc, await res.arrayBuffer());
+        const url = URL.createObjectURL(blob);
+        const type = desc.type || blob.type || '';
+        slot.innerHTML = '';
+        if (type.startsWith('image/')) {
+          const img = el('img', 'attach-media');
+          img.src = url; img.alt = desc.name || 'picture'; img.loading = 'lazy';
+          slot.append(img);
+        } else if (type.startsWith('video/')) {
+          const v = el('video', 'attach-media');
+          v.controls = true; v.src = url; v.preload = 'metadata';
+          slot.append(v);
+        } else if (type.startsWith('audio/')) {
+          const a = el('audio');
+          a.controls = true; a.src = url; a.style.width = '100%';
+          slot.append(a);
+        } else {
+          const a = el('a', 'btn sm', `Save ${desc.name || 'file'}`);
+          a.href = url; a.download = desc.name || 'file';
+          slot.append(a);
+        }
+        open.hidden = true;
+        done = true;
+      } catch (e) {
+        open.disabled = false;
+        open.textContent = 'Try again';
+        wrap.append(el('div', 'attach-note', e.message));
+      }
+    };
+    open.onclick = load;
+    wrap.append(slot, open);
+    // Pictures under a couple of megabytes are cheap: show them without a tap.
+    if (desc.kind === 'image' && (desc.size || 0) <= 2 * 1048576) load();
+    return wrap;
+  }
+
+  // A message payload is plain text, or JSON when it carries an attachment.
+  function parsePayload(raw) {
+    const s = String(raw);
+    if (s.startsWith('{') && s.endsWith('}') && s.includes('"file"')) {
+      try {
+        const o = JSON.parse(s);
+        if (o && o.file && o.file.id && o.file.key) return { text: typeof o.text === 'string' ? o.text : '', file: o.file };
+      } catch { /* a message that merely looks like JSON */ }
+    }
+    return { text: s, file: null };
   }
 
   /* ---------------- rendering ---------------- */
@@ -513,7 +657,7 @@
     return n;
   }
 
-  function renderMessage(m, dec, own, tmpId) {
+  function messageNode(m, dec, own, tmpId) {
     const wrap = el('div', 'msg' + (own ? ' own' : ''));
     if (tmpId) wrap.dataset.tmpId = tmpId;
     if (state.lastAuthor !== m.fp || tmpId) {
@@ -526,13 +670,20 @@
     }
     state.lastAuthor = m.fp;
     const body = el('div', 'body');
-    if (dec) body.textContent = dec.text;
-    else {
+    if (dec) {
+      if (dec.text) body.append(el('div', 'text', dec.text));
+      if (dec.file) body.append(attachmentEl(dec.file, m.room || (state.room && state.room.id)));
+      if (!dec.text && !dec.file) body.append(el('div', 'text', ''));
+    } else {
       body.classList.add('locked');
       body.append(svg(ICON.lock, 'ic'), el('span', null, 'sealed to an older key'));
     }
     wrap.append(body);
-    $('msgs').append(wrap);
+    return wrap;
+  }
+
+  function renderMessage(m, dec, own, tmpId) {
+    $('msgs').append(messageNode(m, dec, own, tmpId));
   }
 
   function addSys(text, t, notice) {
@@ -552,7 +703,9 @@
   function setRetentionNote() {
     const n = $('retentionNote');
     n.hidden = false;
-    n.textContent = `Messages delete themselves ${fmtWindow(state.ttlMs)} after sending — on this device and on the server.`;
+    n.textContent = state.ttlMs == null
+      ? 'Messages are kept until an admin clears them.'
+      : `Messages delete themselves ${fmtWindow(state.ttlMs)} after sending — on this device and on the server.`;
   }
 
   function renderPresence() {
@@ -623,10 +776,11 @@
     if (m.t === 'welcome') {
       setConn('on');
       state.frozen = !!m.frozen;
+      state.muted = !!m.muted;
       state.canPost = !!m.canPost;
       state.online = m.online || [];
       if (m.room) state.room = m.room;
-      if (m.retentionHours) { state.ttlMs = m.retentionHours * 3600000; setRetentionNote(); }
+      if (m.retentionHours !== undefined) { state.ttlMs = ttlFrom(m.retentionHours); setRetentionNote(); }
       setRoomBar();
       renderPresence();
       renderRooms();
@@ -636,7 +790,13 @@
       const own = m.m.fp === state.id.fp && !!m.m.tmpId;
       if (own) {
         const node = document.querySelector(`[data-tmp-id="${m.m.tmpId}"]`);
-        if (node) { delete node.dataset.tmpId; return; }
+        if (node) {
+          // Replace the optimistic bubble with the real one: that is what puts an
+          // attachment (and its key) into it once the relay has stored the blob.
+          const dec = await decryptFrom(m.m);
+          node.replaceWith(messageNode(m.m, dec, true));
+          return;
+        }
       }
       const dec = await decryptFrom(m.m);
       const sticky = atBottom();
@@ -651,12 +811,18 @@
       rerenderNames(m.username);
       return;
     }
-    if (m.t === 'settings') { state.settings = m.settings || state.settings; applySettings(); return; }
+    if (m.t === 'settings') {
+      state.settings = m.settings || state.settings;
+      if (m.retentionHours !== undefined) { state.ttlMs = ttlFrom(m.retentionHours); setRetentionNote(); }
+      applySettings();
+      return;
+    }
     if (m.t === 'evt') { onEvent(m.e); return; }
     if (m.t === 'key:add') { await addPoolKey(m.key); toast(`${m.key.handle} can now read new messages`); return; }
     if (m.t === 'room') {
       state.room = m.room;
       state.frozen = !!m.frozen;
+      state.muted = !!m.muted;
       state.canPost = !!m.canPost;
       $('roomName').textContent = m.room.name;
       setRoomBar();
@@ -678,7 +844,8 @@
   async function sendCurrent() {
     const input = $('input');
     const text = input.value.trim();
-    if (!text || !state.canPost) return;
+    const queued = pendingFile;
+    if ((!text && !queued) || !state.canPost) return;
     input.value = '';
     autoGrow();
     updateComposerState();
@@ -690,15 +857,37 @@
     if (!who.classList.contains('rainbow-name')) who.style.color = colorFor(state.id.fp);
     who.dataset.color = colorFor(state.id.fp);
     head.append(who, timeEl(Date.now()));
-    wrap.append(head, el('div', 'body', text));
+    const body = el('div', 'body');
+    if (text) body.append(el('div', 'text', text));
+    if (queued) {
+      body.append(el('div', 'attach-note', `${queued.name} · ${fmtBytes(queued.size)} — sealing…`));
+      setPending(null);
+    }
+    wrap.append(head, body);
     $('msgs').append(wrap);
     scrollBottom(true);
     try {
-      const { ct, recipients } = await encryptFor(text);
+      let descriptor = null;
+      if (queued) {
+        const sealed = await sealFile(queued.file);
+        const res = await fetch(`/api/rooms/${state.room.id}/files`, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/octet-stream', 'X-Content-Kind': queued.kind },
+          body: sealed.bytes,
+        });
+        const out = await res.json().catch(() => null);
+        if (!res.ok) throw new Error((out && out.error) || `upload failed (${res.status})`);
+        descriptor = {
+          id: out.id, key: sealed.key, iv: sealed.iv,
+          name: queued.name, type: queued.file.type || '', size: queued.size, kind: queued.kind,
+        };
+      }
+      const payload = descriptor ? JSON.stringify({ text, file: descriptor }) : text;
+      const { ct, recipients } = await encryptFor(payload);
       wsSend({ t: 'send', room: state.room.id, tmpId, ct, recipients });
     } catch (e) {
       wrap.remove();
-      toast(`Could not encrypt: ${e.message}`, 4200);
+      toast(`Could not send: ${e.message}`, 4200);
     }
   }
 
@@ -732,6 +921,23 @@
   }
 
   /* ---------------- account sheet ---------------- */
+
+  // Key sync is on by default: after signing in or registering, wrap this device's key
+  // with the password that is already in hand — unless the account already has an
+  // envelope, which must never be overwritten (that would throw away the key it holds).
+  async function maybeSyncKey(password) {
+    try {
+      if (!password || !state.me || state.me.kind !== 'account') return;
+      if (state.me.syncKey) return;
+      if ((state.settings || {}).keySyncDefault === false) return;
+      if (!state.id || !state.id.armoredPrivate) return;
+      const blob = await Identity.wrap(password, state.id.armoredPrivate);
+      await api('/api/sync-key', { method: 'PUT', body: { enabled: true, blob } });
+      await loadMe();
+      renderMe();
+      toast('Key synced to your account — a new device can unlock it with your password. Keep a backup file too.', 5600);
+    } catch { /* the account still works; the backup file is the real recovery path */ }
+  }
 
   async function changePassword() {
     const current = $('pwCurrent').value;
@@ -801,7 +1007,9 @@
     $('rsPrivate').disabled = !r.canEdit || r.builtin;
     $('rsGuestOk').disabled = !r.canEdit;
     $('rsPrivateHint').hidden = !r.builtin;
-    $('rsFilesHint').textContent = 'Pictures and files arrive in the next update; this switch is the permission they will read.';
+    $('rsFilesHint').textContent = (state.settings.allowImages || state.settings.allowVideo || state.settings.allowFiles)
+      ? 'Attachments are allowed site-wide; this switch is this room’s own gate. Files are sealed in the browser before upload.'
+      : 'Attachments are switched off site-wide right now — an admin has to turn the site switch on first.';
 
     const pending = $('rsPending');
     pending.innerHTML = '';
@@ -1134,6 +1342,24 @@
   }
 
   function renderPeopleTab(body, data) {
+    // A generated password is shown once, here, and never logged anywhere.
+    if (state.lastReset) {
+      const box = el('section', 'block');
+      box.append(el('h3', null, `New password for ${state.lastReset.username}`));
+      const field = el('input', 'input mono');
+      field.value = state.lastReset.password;
+      field.readOnly = true;
+      field.onclick = () => field.select();
+      box.append(field);
+      box.append(el('p', 'hint', 'Hand it over, then ask them to change it. Their other sessions were dropped and their synced key envelope was cleared — it was wrapped with the old password.'));
+      const done = el('button', 'btn sm', 'Done');
+      done.onclick = () => { state.lastReset = null; renderAdmin(); };
+      const act = el('div', 'row-actions');
+      act.append(done);
+      box.append(act);
+      body.append(box);
+    }
+
     const acct = el('section', 'block');
     acct.append(el('h3', null, `Accounts (${data.accounts.length})`));
     const me = state.me;
@@ -1175,6 +1401,19 @@
           try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'signout' } }); toast(`${a.username} signed out${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderAdmin(); }
           catch (e) { toast(e.message, 4200); }
         };
+        const mute = el('button', 'btn sm', 'Mute');
+        mute.onclick = () => muteUser(a.username, null);
+        const pw = el('button', 'btn sm', 'Reset password');
+        pw.onclick = async () => {
+          const ok = await dialog({ title: `Reset ${a.username}'s password?`, body: 'A new password is generated and shown to you once. Their sessions are dropped and their synced key envelope is cleared.', confirm: 'Reset', danger: true });
+          if (!ok) return;
+          try {
+            const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'reset-password' } });
+            state.lastReset = { username: a.username, password: r.password };
+            await renderAdmin();
+            toast(`New password ready for ${a.username}`);
+          } catch (e) { toast(e.message, 4200); }
+        };
         const del = el('button', 'btn sm danger', 'Delete');
         del.onclick = async () => {
           const ok = await dialog({ title: `Delete ${a.username}?`, body: 'The account is removed, their sessions are dropped and any room they owned passes to you. This cannot be undone.', confirm: 'Delete', danger: true });
@@ -1182,7 +1421,7 @@
           try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'delete' } }); toast(`${a.username} deleted${r.rooms.length ? ` · took over ${r.rooms.join(', ')}` : ''}`); await refreshAdmin(); }
           catch (e) { toast(e.message, 4200); }
         };
-        actions.append(out, del);
+        actions.append(out, mute, pw, del);
       }
       if (a.ban) {
         const un = el('button', 'btn sm', 'Unban');
@@ -1197,6 +1436,52 @@
       acct.append(row);
     }
     body.append(acct);
+
+    // Live sessions: everything signed in right now, revocable one at a time. Tokens are
+    // never handed out — the panel works on a short hash.
+    const sess = el('section', 'block');
+    const list = data.sessionList || [];
+    sess.append(el('h3', null, `Live sessions (${list.length})`));
+    const dl = el('button', 'btn sm', 'Download accounts .jsonl');
+    dl.onclick = () => { window.location.href = '/api/admin/accounts/export'; };
+    const sessActions = el('div', 'row-actions');
+    sessActions.append(dl);
+    sess.append(sessActions);
+    if (!list.length) sess.append(el('p', 'note', 'Nobody is signed in.'));
+    for (const s of list.slice(0, 40)) {
+      const row = el('div', 'row');
+      row.append(el('span', 'row-name', `${s.username || s.handle || 'someone'} · ${s.role || s.kind}`));
+      row.append(el('span', 'log-meta', `${s.kind}${s.ip ? ` · ${s.ip}` : ''} · seen ${relTime(s.lastSeen)}`));
+      const kill = el('button', 'btn sm', 'Revoke');
+      kill.onclick = async () => {
+        try { const r = await api('/api/admin/sessions', { method: 'POST', body: { id: s.id } }); toast(`Session revoked${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderAdmin(); }
+        catch (e) { toast(e.message, 4200); }
+      };
+      row.append(kill);
+      sess.append(row);
+    }
+    body.append(sess);
+  }
+
+  async function muteUser(username, roomId) {
+    const r = await dialog({
+      title: `Mute ${username}`,
+      body: roomId ? `They keep reading “${roomId}” but cannot post there until the mute expires.` : 'They keep reading and keep their connection — they just cannot post anywhere until it expires.',
+      fields: [
+        { name: 'hours', label: 'How long', type: 'select', options: [
+          { value: '0.25', label: '15 minutes' }, { value: '1', label: '1 hour' },
+          { value: '6', label: '6 hours' }, { value: '24', label: '24 hours' }, { value: '168', label: '7 days' },
+        ] },
+        { name: 'reason', label: 'Reason (shown to them)', type: 'text', placeholder: 'optional' },
+      ],
+      confirm: 'Mute',
+    });
+    if (!r) return;
+    try {
+      const res = await api('/api/mod/ban', { method: 'POST', body: { target: username, kind: 'account', room: roomId || null, hours: Number(r.hours) || 1, reason: r.reason, mute: true } });
+      toast(`${username} muted · ${res.kicked ? 'now' : 'until it expires'}`);
+      await refreshAdmin();
+    } catch (e) { toast(e.message, 4200); }
   }
 
   function renderRoomsTab(body, data) {
@@ -1204,7 +1489,8 @@
       const card = el('section', 'block');
       const head = el('h3', null, r.name);
       card.append(head);
-      card.append(el('p', 'hint', `${r.builtin ? 'the public room' : r.private ? 'private' : 'public'} · ${r.memberCount} member${r.memberCount === 1 ? '' : 's'} · ${r.keys} keys · ${r.online} online${r.frozen ? ' · frozen' : ''}`));
+      const meta = el('p', 'hint', `${r.builtin ? 'the public room' : r.private ? 'private' : 'public'} · ${r.memberCount} member${r.memberCount === 1 ? '' : 's'} · ${r.keys} keys · ${r.online} online${r.frozen ? ' · frozen' : ''}${r.allowFiles ? ' · files allowed' : ''}${r.owner ? ` · owned by ${r.owner}` : ''}`);
+      card.append(meta);
 
       const aboutLabel = el('label', 'field');
       aboutLabel.append(el('span', 'field-label', 'About'));
@@ -1237,7 +1523,20 @@
         catch (e) { toast(e.message, 4200); }
       };
       const actions = el('div', 'row-actions');
-      actions.append(save, freeze, guests, purge);
+      const files = el('button', 'btn sm', r.allowFiles ? 'Attachments off here' : 'Attachments on here');
+      files.onclick = () => patchRoomAdmin(r.id, { allowFiles: !r.allowFiles });
+      actions.append(save, freeze, guests, files, purge);
+      const takeOver = el('button', 'btn sm', 'Give to me');
+      takeOver.onclick = async () => {
+        try { await api('/api/admin/room', { method: 'POST', body: { room: r.id, op: 'owner' } }); toast(`You own “${r.name}” now`); await refreshAdmin(); }
+        catch (e) { toast(e.message, 4200); }
+      };
+      const kickAll = el('button', 'btn sm', 'Clear everyone out');
+      kickAll.onclick = async () => {
+        try { const res = await api('/api/admin/room', { method: 'POST', body: { room: r.id, op: 'kickall' } }); toast(`Cleared ${res.sockets} connection${res.sockets === 1 ? '' : 's'}`); }
+        catch (e) { toast(e.message, 4200); }
+      };
+      actions.append(takeOver, kickAll);
       if (!r.builtin) {
         const priv = el('button', 'btn sm', r.private ? 'Make public' : 'Make private');
         priv.onclick = () => patchRoomAdmin(r.id, { private: !r.private });
@@ -1259,12 +1558,13 @@
   }
 
   function renderBansTab(body, data) {
+    let muteBox = null;
     const mk = el('section', 'block');
     mk.append(el('h3', null, 'Place a ban'));
     const kindLabel = el('label', 'field');
     kindLabel.append(el('span', 'field-label', 'Against'));
     const kind = el('select', 'input sm');
-    for (const [v, l] of [['account', 'an account'], ['fp', 'a device fingerprint']]) { const o = el('option', null, l); o.value = v; kind.append(o); }
+    for (const [v, l] of [['account', 'an account'], ['fp', 'a device fingerprint'], ['ip', 'an IP address (admin only)']]) { const o = el('option', null, l); o.value = v; kind.append(o); }
     kindLabel.append(kind);
     mk.append(kindLabel);
 
@@ -1300,28 +1600,47 @@
 
     const go = el('button', 'btn sm danger', 'Place ban');
     go.onclick = async () => {
-      const payload = { kind: kind.value, target: target.value.trim().toLowerCase(), room: scope.value || null, hours: hours.value === '' ? null : Number(hours.value), reason: reason.value };
+      const payload = { kind: kind.value, target: target.value.trim().toLowerCase(), room: scope.value || null, hours: hours.value === '' ? null : Number(hours.value), reason: reason.value, mute: muteBox.checked };
       if (!payload.target) { toast('Who should I ban?'); return; }
       try {
         const res = await api('/api/mod/ban', { method: 'POST', body: payload });
-        toast(`Banned · ${res.kicked} connection${res.kicked === 1 ? '' : 's'} dropped`);
+        toast(payload.mute ? `Muted · ${payload.target}` : `Banned · ${res.kicked} connection${res.kicked === 1 ? '' : 's'} dropped`);
         target.value = '';
         reason.value = '';
+        muteBox.checked = false;
         await refreshAdmin();
       } catch (e) { toast(e.message, 4200); }
     };
     const mkActions = el('div', 'row-actions');
     mkActions.append(go);
     mk.append(mkActions);
+    const muteRow = el('label', 'toggle-row');
+    muteBox = el('input');
+    muteBox.type = 'checkbox';
+    const muteText = el('span', 'toggle-text');
+    muteText.append(el('span', 'toggle-label', 'Mute instead of ban'),
+      el('span', 'hint', 'A timeout: they keep reading and keep their connection, they just cannot post until it expires.'));
+    muteRow.append(muteBox, muteText);
+    mk.append(muteRow);
     body.append(mk);
 
     const list = el('section', 'block');
-    list.append(el('h3', null, `Active bans (${data.bans.length})`));
-    if (!data.bans.length) list.append(el('p', 'note', 'Nobody is banned.'));
+    const clear = el('button', 'btn sm danger', 'Lift every ban');
+    clear.onclick = async () => {
+      const ok = await dialog({ title: 'Lift every ban?', body: 'Every ban and mute in the list goes away at once, site-wide and per room.', confirm: 'Lift all', danger: true });
+      if (!ok) return;
+      try { const res = await api('/api/admin/bans', { method: 'POST', body: {} }); toast(`Lifted ${res.removed} ban${res.removed === 1 ? '' : 's'}`); await refreshAdmin(); }
+      catch (e) { toast(e.message, 4200); }
+    };
+    const head = el('div', 'row-actions');
+    head.append(clear);
+    list.append(el('h3', null, `Active bans (${data.bans.length})`), head);
+    if (!data.bans.length) list.append(el('p', 'note', 'Nobody is banned or muted.'));
     for (const b of data.bans) {
       const row = el('div', 'row');
-      const who = b.kind === 'account' ? b.target : `${b.target.slice(0, 12)}… (device)`;
+      const who = b.kind === 'account' ? b.target : b.kind === 'ip' ? `${b.target} (address)` : `${b.target.slice(0, 12)}… (device)`;
       row.append(el('span', 'row-name', who));
+      if (b.mute) row.append(el('span', 'chip', 'muted'));
       row.append(el('span', 'log-meta', `${b.room ? `only in ${b.room}` : 'site-wide'} · ${b.until ? `until ${fmtWhen(b.until)}` : 'permanent'}${b.reason ? ` · ${b.reason}` : ''} · by ${b.by || 'system'}`));
       const un = el('button', 'btn sm', 'Lift');
       un.onclick = () => unban({ id: b.id });
@@ -1338,8 +1657,43 @@
       mkToggle('Allow new rooms', 'allowNewRooms', 'Admins can always create rooms.'),
       mkToggle('Allow guests', 'guestAccess', 'Anonymous visitors may enter rooms that welcome them.'),
       mkToggle('Allow signups', 'allowRegistration', 'Off = nobody new can create an account. The first account on an empty relay can still register.'),
+      mkToggle('Pictures (images)', 'allowImages', 'Pictures can be attached at all. Every room has its own switch on top of this.'),
+      mkToggle('Video', 'allowVideo', 'Video attachments, same two gates as pictures.'),
+      mkToggle('Other files', 'allowFiles', 'Documents, archives, audio — anything that is not an image or video.'),
     );
     body.append(policy);
+
+    // How long ciphertext (and the attachments that belong to it) lives. Shortening the
+    // window deletes immediately; "keep" leaves it until somebody clears it by hand.
+    const life = el('section', 'block');
+    life.append(el('h3', null, 'Message lifetime'));
+    life.append(el('p', 'hint', 'Applies to messages and attachments alike. Shortening it sweeps the relay at once.'));
+    const lifeSel = el('select', 'input sm');
+    const configLabel = `follow config.json (${fmtWindow((data.settings.configRetentionHours || 0) * 3600000)})`;
+    for (const [v, l] of [
+      ['config', configLabel], ['1', '1 hour'], ['6', '6 hours'], ['12', '12 hours'], ['24', '24 hours'],
+      ['72', '3 days'], ['168', '7 days'], ['720', '30 days'], ['forever', 'keep until cleared by hand'],
+    ]) { const o = el('option', null, l); o.value = v; lifeSel.append(o); }
+    lifeSel.value = data.settings.keepForever ? 'forever' : (data.settings.retentionHours == null ? 'config' : String(data.settings.retentionHours));
+    const lifeApply = el('button', 'btn sm primary', 'Apply lifetime');
+    lifeApply.onclick = async () => {
+      const payload = lifeSel.value === 'forever' ? { keepForever: true }
+        : lifeSel.value === 'config' ? { retentionHours: null, keepForever: false }
+        : { retentionHours: Number(lifeSel.value), keepForever: false };
+      try {
+        const res = await api('/api/admin/settings', { method: 'PATCH', body: payload });
+        state.settings = res.settings;
+        state.ttlMs = ttlFrom(res.retentionHours);
+        setRetentionNote();
+        toast(res.retentionHours == null ? 'Messages are now kept until cleared' : `Messages now delete after ${fmtWindow(res.retentionHours * 3600000)}`);
+        await renderAdmin();
+      } catch (e) { toast(e.message, 4200); }
+    };
+    life.append(lifeSel);
+    const lifeActions = el('div', 'row-actions');
+    lifeActions.append(lifeApply);
+    life.append(lifeActions);
+    body.append(life);
 
     const motd = el('section', 'block');
     motd.append(el('h3', null, 'Notice board'));
@@ -1480,6 +1834,7 @@
         $('loginPass').value = '';
         $('authNote').textContent = '';
         await afterAuth();
+        await maybeSyncKey(password);
       } catch (e) {
         $('authNote').textContent = e.body && e.body.banned ? e.message : 'Wrong username or password.';
         if (!$('appScreen').hidden) toast(`Sign-in failed: ${e.message}`, 5000);
@@ -1492,6 +1847,7 @@
         await api('/api/auth/register', { method: 'POST', body: { username, password } });
         $('regPass').value = '';
         await afterAuth();
+        await maybeSyncKey(password);
         if (state.claimable) { toast('Account created. Claim the admin seat with your one-time code.', 5200); openSheet($('claimSheet')); }
       } catch (e) {
         $('authNote').textContent = e.message;
@@ -1538,6 +1894,24 @@
       if (close) close.onclick = closeSheets;
     }
 
+    $('attachInput').onchange = e => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!f) return;
+      const kind = kindOf(f);
+      const kinds = allowedKinds();
+      if (!kinds[kind]) {
+        toast(kind === 'image' ? 'Pictures are switched off right now' : kind === 'video' ? 'Video is switched off right now' : 'File sending is switched off right now', 4200);
+        return;
+      }
+      if (state.maxFileBytes && f.size > state.maxFileBytes) {
+        toast(`That file is ${fmtBytes(f.size)} — the cap is ${fmtBytes(state.maxFileBytes)}`, 4600);
+        return;
+      }
+      setPending({ file: f, name: f.name, size: f.size, kind });
+      $('input').focus();
+    };
+    $('attachBtn').onclick = pickFile;
     $('saveHandle').onclick = saveHandle;
     $('backupKey').onclick = () => Identity.backup(state.id);
     $('restoreKey').onchange = async e => {

@@ -30,15 +30,25 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   as a **guest** — a random handle with no account, limited to rooms that welcome guests.
 - **Roles.** `admin` › `mod` › `user` › `guest`. Admins run the site and can enter any room;
   mods handle people and rooms; the owner of a room controls that room.
-- **Moderation.** Ban or **temp-ban** (1h … 30 days) an account site-wide or per-room, kick
-  someone from a room, approve or deny join requests, promote room mods, freeze a room,
-  **slow mode** (a per-room floor between one identity's posts), **burn a room's stored ciphertext
-  on the spot**, delete a room (its key pool and ciphertext are shredded with it).
-- **Admin panel.** Six tabs — overview, activity, people, rooms, bans, settings. Close signups,
-  stop new rooms, stop guests, **lock every room down with one switch**, set a site-wide notice,
-  push a relay notice into a room, sign an account out on every device, delete an account (its
-  rooms pass to the admin, never orphaned), ban by account *or* device fingerprint, and watch
-  totals, a 7-day sparkline and who is online right now.
+- **Pictures, video and files — off until an admin says otherwise.** Attachments are gated twice:
+  a site-wide switch per kind (pictures / video / other files) and the room's own switch. Both are
+  off out of the box, so a fresh relay takes text only. A file is sealed in the browser with a
+  one-off AES-GCM key, and **that key travels inside the room's OpenPGP message** — the relay stores
+  a blob it cannot open, and never learns the filename.
+- **The message lifetime is a setting, not a rebuild.** An admin picks 1 hour … 30 days, or *keep
+  until cleared by hand*. Shortening the window sweeps the relay the moment it is applied, and
+  attachments follow the same window as the messages that point at them.
+- **Moderation.** Ban or **temp-ban** (1h … 30 days) an account site-wide or per-room, **mute** someone
+  (a timeout: they keep reading and keep their connection, they just cannot post), **ban by device
+  fingerprint or IP address**, kick someone from a room, approve or deny join requests, promote room
+  mods, freeze a room, **slow mode** (a per-room floor between one identity's posts), **burn a room's
+  stored ciphertext on the spot**, delete a room (its key pool, ciphertext and attachments are
+  shredded with it).
+- **Admin panel.** Six tabs — overview, activity, people, rooms, bans, settings. Close signups, stop
+  new rooms, stop guests, **lock every room down with one switch**, set a site-wide notice, push a
+  relay notice into a room, **reset a password** (the generated one is shown once and never logged),
+  sign an account out everywhere or revoke one session, delete an account (its rooms pass to the
+  admin, never orphaned), and watch totals, a 7-day sparkline and who is online right now.
 - **The activity log lives on the site, not in your phone.** Every join, leave, key registration,
   ban, role change and sign-in attempt streams into the admin panel live. Filter it by kind, or
   download the raw `.jsonl`. Mods see the same trail minus admin-only rows and IP addresses; the
@@ -66,6 +76,7 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | session tokens (30-day, HttpOnly cookie) | anyone's private key |
 | room names, membership, room mods, join requests | the contents of the sync envelope |
 | bans (target, scope, expiry, reason) | attachments (they are encrypted client-side) |
+| attachment blobs: how many bytes, in which room, uploaded when, by whom | what any file *is* — no name, no type, no content |
 | the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
 | the site notice text and which admins wear the rainbow badge | |
 | message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
@@ -111,12 +122,26 @@ use, and an empty relay clears it at the first signup because the seat is alread
 
 | tab | what it is for |
 |---|---|
-| **Overview** | live totals (online, keys, stored rows, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
-| **Activity** | the audit log: joins, leaves, keys, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` |
-| **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, sign out everywhere, delete, ban, and the rainbow-name toggle |
-| **Rooms** | rename/about, **slow mode**, freeze, guest access, make private, clear stored ciphertext now, delete |
-| **Bans** | place a ban against an account or a device fingerprint, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown |
-| **Settings** | allow new rooms, allow guests, allow signups, the site notice, announcements, and **lockdown** |
+| **Overview** | live totals (online, keys, stored rows, attachments, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
+| **Activity** | the audit log: joins, leaves, keys, uploads, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` |
+| **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban, and the rainbow-name toggle — plus every live session with a one-click revoke and an accounts export |
+| **Rooms** | rename/about, **slow mode**, freeze, guest access, **attachments on/off**, take ownership, clear everyone out, clear stored ciphertext now, delete |
+| **Bans** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
+| **Settings** | allow new rooms, guests, signups; **pictures / video / other files**; the **message lifetime**; the site notice; announcements; and **lockdown** |
+
+**Attachments** are switched on twice, on purpose: the site switch says which *kinds* may be sent at
+all, and each room says whether it accepts them. Neither is on by default. A file is encrypted with a
+one-off AES-GCM key in the browser and uploaded as opaque bytes; the key is addressed to the room
+inside the same OpenPGP message as the caption. The relay can hand the blob back but can never open
+it. Two honest caveats: the kind (image / video / file) is **declared by the sending client**, because
+the relay has no way to inspect sealed bytes — the switches are policy, not a content filter; and an
+attachment dies with the retention window, so an old message can point at bytes that are already gone.
+
+**Key sync is on by default.** When you sign in or register, the browser wraps this device's key with
+the password you just typed and stores the sealed envelope on your account, so a new device can unlock
+your history. It never overwrites an existing envelope, it can be switched off in *Account*, and the
+honest caveat is unchanged: a weak password can be attacked offline against a stolen envelope, so keep
+a backup file.
 
 **Lockdown** is the panic switch: freeze every room, stop new rooms, close signups and stop guests.
 Lifting it clears every freeze but deliberately leaves the switches where the lockdown left them —
@@ -138,7 +163,9 @@ relay and never stored as a message (the relay does not get to fabricate chat).
 | `auth.scryptN` | `16384` | password hashing cost (lower it only in tests) |
 | `maxPool` | `500` | keys per room before idle ones are evicted |
 | `maxMsgBytes` | `131072` | ciphertext cap per message |
-| `rate.*` | 25/8/40/10/10 | per-minute per-IP caps: messages, key registrations, connections, auth, guest sessions |
+| `maxFileBytes` | `8388608` | cap per attachment (8 MB); over it the upload is refused unread |
+| `maxFilesPerRoom` | `2000` | attachments held per room before it refuses more |
+| `rate.*` | 25/8/40/10/10/10 | per-minute per-IP caps: messages, key registrations, connections, auth, guest sessions, uploads |
 
 ## Layout
 
@@ -170,8 +197,10 @@ private room stays invisible to non-members, a freeze blocks ordinary members bu
 owners, a ban drops the live socket, the first account on an empty relay seats the admin while the
 claim code stays the fallback for a vacated seat, the admin log is staff-only and never serves the
 claim code, lockdown closes the doors, slow mode throttles one identity but not staff, announcements
-are never stored as messages, account deletion hands over the rooms, and an admin can burn a room's
-ciphertext on the spot. CI runs it on every push.
+are never stored as messages, account deletion hands over the rooms, an admin can burn a room's
+ciphertext on the spot, attachments stay off until both switches are on and round-trip byte for byte,
+a mute blocks posting without ending the session, a password reset and a single-session revoke both
+stick, and the message lifetime is policy. CI runs it on every push.
 
 ## Honest limits
 

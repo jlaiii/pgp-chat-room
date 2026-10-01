@@ -608,6 +608,167 @@ test('PGP Room relay — end to end', async t => {
     assert.equal((await admin('POST', '/api/admin/purge', JSON.stringify({ room: 'no-such-room' }))).status, 404);
   });
 
+  await t.test('attachments are off by default and need both switches', async () => {
+    const poster = makeClient();
+    await poster('POST', '/api/auth/register', JSON.stringify({ username: 'poster', password: 'poster-pass-1' }));
+    await poster('POST', '/api/rooms/lounge/join');           // posting rights come with membership
+    const blob = Buffer.from('ciphertext stand-in for a picture');
+    const upload = (client, kind, body = blob) => fetch(`${BASE}/api/rooms/lounge/files`, {
+      method: 'POST', headers: { Cookie: client.cookie(), 'X-Content-Kind': kind, 'Content-Type': 'application/octet-stream' }, body,
+    });
+
+    // Site switch first: nothing is allowed out of the box.
+    assert.equal((await upload(poster, 'image')).status, 403, 'attachments are off site-wide by default');
+
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowImages: true }));
+    assert.equal((await upload(poster, 'image')).status, 403, 'the room switch is a second gate');
+
+    await admin('PATCH', '/api/rooms/lounge', JSON.stringify({ allowFiles: true }));
+    const up = await upload(poster, 'image');
+    assert.equal(up.status, 201, 'with both switches on the upload lands');
+    const { id, size } = await up.json();
+    assert.equal(size, blob.length);
+    assert.match(id, /^[a-z0-9]{32}$/);
+
+    // The blob round-trips byte for byte for a room reader…
+    const got = await fetch(`${BASE}/api/rooms/lounge/files/${id}`, { headers: { Cookie: poster.cookie() } });
+    assert.equal(got.status, 200);
+    assert.equal(got.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(got.headers.get('cache-control'), 'no-store');
+    assert.equal(Buffer.compare(Buffer.from(await got.arrayBuffer()), blob), 0, 'the stored bytes are what was sent');
+
+    // …and only for a room reader: a stranger gets nothing useful.
+    const stranger = makeClient();
+    assert.equal((await fetch(`${BASE}/api/rooms/lounge/files/${id}`, { headers: { Cookie: stranger.cookie() } })).status, 401);
+    assert.equal((await fetch(`${BASE}/api/rooms/lounge/files/${id}`)).status, 401);
+
+    // Video has its own switch, still off.
+    assert.equal((await upload(poster, 'video')).status, 403, 'video is a separate switch');
+    assert.equal((await upload(poster, 'nonsense')).status, 400, 'unknown kinds are refused');
+
+    // Over the cap: refused before anything is written.
+    const huge = Buffer.alloc(9 * 1024 * 1024, 1);
+    assert.equal((await upload(poster, 'image', huge)).status, 413, 'the size cap holds');
+
+    // The relay only ever sees ciphertext, and the activity log records the upload.
+    const blobDir = path.join(dir, 'data', 'rooms', 'lounge', 'files');
+    const stored = await readFile(path.join(blobDir, `${id}.bin`));
+    assert.equal(Buffer.compare(stored, blob), 0);
+    const log = await admin('GET', '/api/admin/events?type=file');
+    assert.ok(log.body.events.some(e => e.bytes === blob.length), 'the upload is in the activity log');
+
+    assert.equal((await api('/healthz')).body.files >= 1, true, 'healthz counts stored attachments');
+  });
+
+  await t.test('a mute stops posting without ending the session', async () => {
+    const M = await makeKey('muted');
+    const target = makeClient();
+    await target('POST', '/api/auth/register', JSON.stringify({ username: 'murky', password: 'murky-pass-111' }));
+    await target('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: M.fp, keyId: M.keyId, handle: 'murky', publicKey: M.publicKey }));
+    const conn = await connect(target.cookie());
+    conn.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: M.fp, handle: 'murky' }));
+    const welcome = await waitFor(conn.frames, f => f.t === 'welcome');
+    assert.equal(welcome.muted, false);
+
+    const ct = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: 'before the mute' }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: M.publicKey })],
+      signingKeys: M.priv,
+      format: 'armored',
+    });
+    conn.ws.send(JSON.stringify({ t: 'send', room: 'lounge', tmpId: 'pre-mute', ct, recipients: [M.fp] }));
+    await waitFor(conn.frames, f => f.t === 'msg' && f.m.tmpId === 'pre-mute');
+
+    const muted = await admin('POST', '/api/mod/ban', JSON.stringify({ target: 'murky', kind: 'account', room: null, hours: 1, mute: true, reason: 'cool off' }));
+    assert.equal(muted.status, 200);
+    assert.equal(muted.body.mute, true);
+    assert.equal(muted.body.kicked, 0, 'a mute does not drop the connection');
+
+    const before = conn.frames.length;
+    conn.ws.send(JSON.stringify({ t: 'send', room: 'lounge', tmpId: 'muted-send', ct, recipients: [M.fp] }));
+    const refusal = await waitFor(conn.frames, f => f.t === 'err' && /muted/.test(f.msg || ''));
+    assert.match(refusal.msg, /cool off/);
+    assert.ok(conn.frames.length > before, 'the refusal came back on the same socket');
+
+    // They keep reading: the socket still answers, and they can still sign in.
+    conn.ws.send(JSON.stringify({ t: 'ping' }));
+    await waitFor(conn.frames, f => f.t === 'pong');
+    assert.equal((await target('GET', '/api/me')).status, 200, 'a mute is not a lockout');
+
+    const bans = await mod('GET', '/api/mod/bans');
+    const rec = bans.body.bans.find(b => b.target === 'murky' && b.mute);
+    assert.ok(rec, 'the mute is listed as a mute');
+    assert.equal((await admin('POST', '/api/mod/unban', JSON.stringify({ id: rec.id }))).status, 200);
+
+    const after = conn.frames.length;
+    conn.ws.send(JSON.stringify({ t: 'send', room: 'lounge', tmpId: 'after-mute', ct, recipients: [M.fp] }));
+    await waitFor(conn.frames, f => f.t === 'msg' && f.m.tmpId === 'after-mute');
+    assert.ok(conn.frames.length > after, 'posting works again once the mute is lifted');
+    conn.ws.close();
+  });
+
+  await t.test('an admin can reset a password and revoke a single session', async () => {
+    const victim = makeClient();
+    await victim('POST', '/api/auth/register', JSON.stringify({ username: 'forgetful', password: 'forget-me-123' }));
+
+    const list = await admin('GET', '/api/admin/sessions');
+    assert.equal(list.status, 200);
+    const mine = list.body.sessions.find(s => s.username === 'forgetful');
+    assert.ok(mine, 'live sessions are listed');
+    assert.equal(mine.id.length, 12);
+    assert.ok(!('token' in mine), 'the raw token is never handed to the panel');
+
+    const reset = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'forgetful', op: 'reset-password' }));
+    assert.equal(reset.status, 200);
+    assert.ok(reset.body.password.length >= 12, 'a new password comes back once');
+    assert.equal((await victim('GET', '/api/me')).status, 401, 'the old sessions are gone');
+    assert.equal((await makeClient()('POST', '/api/auth/login', JSON.stringify({ username: 'forgetful', password: 'forget-me-123' }))).status, 401, 'the old password no longer works');
+
+    const again = makeClient();
+    assert.equal((await again('POST', '/api/auth/login', JSON.stringify({ username: 'forgetful', password: reset.body.password }))).status, 200, 'the new one works');
+    const list2 = await admin('GET', '/api/admin/sessions');
+    const fresh = list2.body.sessions.find(s => s.username === 'forgetful');
+    assert.equal((await admin('POST', '/api/admin/sessions', JSON.stringify({ id: fresh.id }))).status, 200);
+    assert.equal((await again('GET', '/api/me')).status, 401, 'that one session is gone');
+    assert.equal((await admin('POST', '/api/admin/sessions', JSON.stringify({ id: 'deadbeef0000' }))).status, 404);
+  });
+
+  await t.test('the message lifetime is policy the admin can change at any time', async () => {
+    assert.equal((await api('/healthz')).body.retentionHours, 48, 'the window starts at config.json');
+    const one = await admin('PATCH', '/api/admin/settings', JSON.stringify({ retentionHours: 1, keepForever: false }));
+    assert.equal(one.status, 200);
+    assert.equal(one.body.retentionHours, 1);
+    assert.equal((await api('/healthz')).body.retentionHours, 1, 'the relay publishes the new window');
+    assert.equal((await admin('GET', '/api/me')).body.retentionHours, 1, 'and so does every client');
+    assert.match(srv.log(), /retention-change/, 'the change is applied and logged at once');
+
+    const keep = await admin('PATCH', '/api/admin/settings', JSON.stringify({ keepForever: true }));
+    assert.equal(keep.body.retentionHours, null, 'keep means keep: no window is published');
+    assert.equal((await api('/healthz')).body.retentionHours, null);
+
+    const back = await admin('PATCH', '/api/admin/settings', JSON.stringify({ keepForever: false, retentionHours: null }));
+    assert.equal(back.body.retentionHours, 48, 'back to following config.json');
+  });
+
+  await t.test('an admin can take a room over, clear it out, and lift every ban', async () => {
+    const made = await admin('POST', '/api/rooms', JSON.stringify({ name: 'Handover Room' }));
+    const rid = made.body.room.id;
+    const owner = await admin('POST', '/api/admin/room', JSON.stringify({ room: rid, op: 'owner' }));
+    assert.equal(owner.status, 200);
+    assert.equal(owner.body.owner, 'jay');
+    const overview = await admin('GET', '/api/admin/overview');
+    assert.equal(overview.body.perRoom.find(r => r.id === rid).owner, 'jay', 'ownership is visible in the panel');
+
+    assert.equal((await admin('POST', '/api/admin/room', JSON.stringify({ room: rid, op: 'kickall' }))).status, 200);
+    assert.equal((await admin('POST', '/api/admin/room', JSON.stringify({ room: rid, op: 'nonsense' }))).status, 400);
+
+    await admin('POST', '/api/mod/ban', JSON.stringify({ target: 'murky', kind: 'account', room: null, hours: 1 }));
+    const cleared = await admin('POST', '/api/admin/bans', JSON.stringify({}));
+    assert.equal(cleared.status, 200);
+    assert.ok(cleared.body.removed >= 1, 'every ban goes at once');
+    assert.equal((await admin('GET', '/api/mod/bans')).body.bans.length, 0);
+  });
+
   await t.test('rate limits a burst of sends', async () => {
     const connA = await connect(guest.cookie());
     connA.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: A.fp, handle: 'alice-1' }));

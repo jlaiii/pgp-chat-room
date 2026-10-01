@@ -147,6 +147,22 @@ textarea.input{min-height:70px;padding:10px 12px;line-height:1.45;resize:vertica
   padding:7px 12px;text-align:left;justify-content:flex-start;
 }
 
+/* ---------------- attachments ---------------- */
+
+.composer .attach{min-width:44px;min-height:44px;border-radius:50%;background:var(--panel2);border:1px solid var(--line)}
+.composer .attach svg{width:19px;height:19px;fill:var(--mut)}
+.attach-chip{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 12px 6px;padding:7px 10px;
+  background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-sm);font-size:12px;
+}
+.attach-chip .chip{font-size:11.5px}
+.msg .body .text{white-space:pre-wrap;word-wrap:break-word}
+.attach{display:flex;flex-direction:column;gap:6px;margin-top:2px}
+.attach-note{font-size:11.5px;color:var(--mut2)}
+.attach-media{max-width:min(320px,60vw);max-height:280px;border-radius:var(--r-sm);display:block}
+.attach img.attach-media{width:auto;height:auto}
+.attach .btn{align-self:flex-start}
+
 .frozen-bar{
   text-align:center;font-size:12px;color:var(--warn);background:#241d0e;border-top:1px solid #4a3c1c;
   padding:8px 12px;
