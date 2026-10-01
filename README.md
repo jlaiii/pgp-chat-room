@@ -78,13 +78,17 @@ chat.example.com {
 }
 ```
 
-### Claiming the first admin
+### The first admin
 
-The first account is a normal `user`; the admin seat is **claimed**, never assumed. On first
-boot with no admin, the relay generates a one-time 8-character code, writes it to
-`data/settings.json` and emits an `admin-claim` event. `scripts/telegram-notify.py` (or your
-own reader of `data/events.log`) delivers it to the operator. Then: create your account in the
-app → *Moderation & admin → Claim admin* → enter the code. It burns on use.
+The first account registered on an empty relay **is** the admin — sign up before you hand the link
+out and you have an operator in one step. Every later account is a plain `user`; from then on the
+seat is only *claimed* (one-shot code) or *granted* (admin panel), never assumed.
+
+The claim code is the fallback for a relay that has accounts but no admin (a vacated seat). While no
+admin exists, boot generates a one-time 8-character code into `data/settings.json` and emits an
+`admin-claim` event; `scripts/telegram-notify.py` (or your own reader of `data/events.log`) delivers
+it to the operator, who enters it in the app under *Moderation & admin → Claim admin*. It burns on
+use, and an empty relay clears it at the first signup because the seat is already taken.
 
 ## Configuration
 

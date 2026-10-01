@@ -69,10 +69,12 @@ def stamp(ms: int) -> str:
 
 
 def claim_text(code: str) -> str:
-    return ("PGP Room — your admin seat is unclaimed.\n\n"
+    return ("PGP Room — bootstrap code (no admin seat is taken yet).\n\n"
             f"One-time code: {code}\n\n"
-            "Create your account in the app, then use Moderation & admin -> Claim admin and enter "
-            "this code. It works once and is stored nowhere afterwards."
+            "On an empty relay you do not need this: the first account to register is seated as "
+            "admin automatically. This code is the fallback for a relay that already has accounts "
+            "but no admin — enter it under Moderation & admin -> Claim admin. It works once and is "
+            "cleared the moment it is used."
             + (f"\n{ROOM_URL}" if ROOM_URL else ""))
 
 

@@ -174,22 +174,21 @@ test('PGP Room relay — end to end', async t => {
     assert.match(bad.body.error, /username/);
   });
 
-  await t.test('the first admin is claimed with the one-shot code, never assumed', async () => {
+  await t.test('the first account on an empty relay is seated as admin; the seat is never assumed after that', async () => {
+    const armed = JSON.parse(await readFile(path.join(dir, 'data', 'settings.json'), 'utf8'));
+    assert.ok(armed.adminClaim, 'the operator is armed with a fallback code while the relay is empty');
+
     const reg = await admin('POST', '/api/auth/register', JSON.stringify({ username: 'jay', password: 'correct-horse-battery' }));
     assert.equal(reg.status, 201);
-    assert.equal(reg.body.me.role, 'user', 'registration alone never grants admin');
-
-    const settings = JSON.parse(await readFile(path.join(dir, 'data', 'settings.json'), 'utf8'));
-    assert.ok(settings.adminClaim, 'the operator is given a claim code');
-
-    assert.equal((await admin('POST', '/api/auth/claim', JSON.stringify({ code: 'NOPE1234' }))).status, 403);
-    const claim = await admin('POST', '/api/auth/claim', JSON.stringify({ code: settings.adminClaim }));
-    assert.equal(claim.status, 200);
-    assert.equal(claim.body.me.role, 'admin');
+    assert.equal(reg.body.me.role, 'admin', 'the very first account is the operator');
+    assert.equal(reg.body.claimable, false, 'there is nothing left to claim');
+    assert.equal((await admin('GET', '/api/me')).body.me.role, 'admin');
 
     const after = JSON.parse(await readFile(path.join(dir, 'data', 'settings.json'), 'utf8'));
-    assert.equal(after.adminClaim, null, 'the code is burned and cleared');
+    assert.equal(after.adminClaim, null, 'the fallback code is cleared once the seat is taken');
     assert.equal((await admin('GET', '/healthz')).body.adminClaimable, false);
+    assert.equal((await admin('POST', '/api/auth/claim', JSON.stringify({ code: 'NOPE1234' }))).status, 409,
+      'claiming is refused while an admin exists');
   });
 
   await t.test('roles: admin promotes a mod, mods cannot promote', async () => {
@@ -477,5 +476,35 @@ test('PGP Room relay — end to end', async t => {
       assert.equal(raw.trim(), '', `segment not emptied: ${f}`);
     }
     assert.match(srv.log(), /retention-sweep|shredded/, 'relay logged the sweep');
+  });
+
+  await t.test('with the seat vacated, the one-shot code still seats an admin', async () => {
+    // A vacant seat (accounts exist, no admin) can only be produced out of band — that is
+    // the documented recovery path: set "role": "user" in data/accounts.json and restart.
+    // The relay then re-arms a claim code, which is the fallback this covers.
+    srv.proc.kill('SIGTERM');
+    await sleep(600);
+
+    const accountsFile = path.join(dir, 'data', 'accounts.json');
+    const accounts = JSON.parse(await readFile(accountsFile, 'utf8'));
+    for (const a of accounts.accounts) if (a.role === 'admin') a.role = 'user';
+    await writeFile(accountsFile, JSON.stringify(accounts));
+
+    await writeConfig();
+    srv = await startServer(cfgPath);
+    procs.push(srv.proc);
+
+    const code = JSON.parse(await readFile(path.join(dir, 'data', 'settings.json'), 'utf8')).adminClaim;
+    assert.equal(String(code || '').length, 8, 'the relay re-arms a claim code while no admin exists');
+    assert.equal((await api('/healthz')).body.adminClaimable, true);
+
+    assert.equal((await admin('POST', '/api/auth/claim', JSON.stringify({ code: 'NOPE1234' }))).status, 403, 'a wrong code is refused');
+    const claim = await admin('POST', '/api/auth/claim', JSON.stringify({ code }));
+    assert.equal(claim.status, 200);
+    assert.equal(claim.body.me.role, 'admin');
+
+    const after = JSON.parse(await readFile(path.join(dir, 'data', 'settings.json'), 'utf8'));
+    assert.equal(after.adminClaim, null, 'the code burns on use');
+    assert.match(srv.log(), /admin-claimed/, 'the relay logged the claim');
   });
 });

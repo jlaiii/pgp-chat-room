@@ -6,8 +6,9 @@
 npm test          # node --test test/  — spawns a real relay on a temp data dir
 ```
 
-Covers: the shell + CSP, that every API needs a session, the bootstrap claim code (and that a wrong
-code is refused), roles and promotions, guest sessions, malformed/private-key rejection, the
+Covers: the shell + CSP, that every API needs a session, the admin bootstrap (the first account on an
+empty relay is seated as `admin`, later accounts are plain `user`s, and the fallback claim code still
+seats one on a vacated seat while refusing a wrong code), roles and promotions, guest sessions, malformed/private-key rejection, the
 pre-join message staying unreadable to a later key, a post-join message decrypting and verifying its
 signature, a non-recipient failing to decrypt, ciphertext-only storage (per room), a private room
 staying invisible with join-requests needing approval, a freeze blocking ordinary members but not

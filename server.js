@@ -316,12 +316,19 @@ async function handleRequest(req, res) {
     if (method === 'POST' && p === '/api/auth/register') {
       if (!rateOk(ip, 'auth', (CFG.rate && CFG.rate.authPerMin) || 10)) return fail(res, 429, 'slow down');
       const b = await readJson(req);
-      const r = auth.createAccount(b.username, b.password, 'user');   // the first admin is claimed, never assumed
+      // Bootstrap: the first account on a relay that has no accounts at all seats the
+      // admin, so a fresh install has an operator in one step. Every later account is a
+      // plain `user` — after the first signup the seat is only claimed (one-shot code)
+      // or granted (admin panel), never assumed.
+      const firstAccount = auth.count() === 0;
+      const r = auth.createAccount(b.username, b.password, firstAccount ? 'admin' : 'user');
       if (r.error) return fail(res, 400, r.error);
+      if (firstAccount) settings.clearClaimCode();   // the seat is taken: drop the fallback code
       const session = auth.createSession({ kind: 'account', username: r.account.username, handle: r.account.username, role: r.account.role, ip });
       setCookie(res, session);
-      event('register', { username: r.account.username, ip });
-      log('register', r.account.username);
+      event('register', { username: r.account.username, ip, role: r.account.role });
+      log('register', r.account.username, `role=${r.account.role}`);
+      if (firstAccount) { event('admin-claimed', { username: r.account.username, ip, first: true }); log('admin-seated', r.account.username); }
       return send(res, 201, { ok: true, me: meView(session), claimable: !auth.hasAdmin() });
     }
 
@@ -865,9 +872,11 @@ function load() {
   const c = chat.load(rooms.all().map(x => x.id));
   for (const room of rooms.all()) fs.mkdirSync(chat.msgDir(room.id), { recursive: true });
 
-  // Bootstrap: with no admin account, publish a one-shot claim code. It is written
-  // to settings.json and emitted as an event (the root-run notifier DMs it to the
-  // operator) — never to stdout, which is what journald keeps.
+  // Bootstrap: while no admin exists, keep a one-shot claim code on hand as the
+  // fallback way to seat one. It is written to settings.json and emitted as an event
+  // (the root-run notifier DMs it to the operator) — never to stdout, which is what
+  // journald keeps. On an empty relay the first account to register is seated as admin
+  // and clears the code: that path needs no code, and a live secret is dead weight.
   if (!auth.hasAdmin()) {
     const { code, created } = settings.ensureClaimCode();
     if (created) event('admin-claim', { code, note: 'claim the first admin account with this code (app -> Admin)' });

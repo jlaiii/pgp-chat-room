@@ -115,7 +115,7 @@ curl -sI https://chat.example.com/ | grep -i content-security-policy
 | Change retention | edit `retentionHours`, restart; clients pick it up on next connect |
 | Room state | `curl -s http://127.0.0.1:8788/healthz` |
 | **Reset the room** | stop the service, then remove `data/rooms/<roomId>/` for the room you want gone (the lounge is `lounge`) — or delete the room from the admin panel, which shreds its pool and ciphertext for you. To reset *everything*, remove `data/` entirely. Note: any browser still open re-registers its key on reconnect; close clients first if you want a truly empty room. |
-| **Claim the admin seat** | with no admin present the relay writes a one-time code to `data/settings.json` and emits an `admin-claim` event. Deliver it to the operator (the bundled notifier DMs it), then create your account in the app and use *Moderation & admin → Claim admin*. The code is cleared the moment it is used. |
+| **Seat the admin** | on a relay with no accounts, the first account to register is the admin automatically — sign up in the app and you are done (the relay clears the fallback code at the same time). If accounts exist but no admin (a vacated seat), the relay writes a one-time code to `data/settings.json` and emits an `admin-claim` event: deliver it to the operator (the bundled notifier DMs it) and use *Moderation & admin → Claim admin*. |
 | **Lost the admin seat** | stop the service, edit `data/accounts.json` and set `"role": "admin"` on your username, start it again. |
 | Upgrade | `git pull && npm ci --omit=dev && systemctl restart pgpchat` |
 

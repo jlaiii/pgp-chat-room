@@ -12,11 +12,11 @@ does not match `Host` is rejected with 403 before it is routed.
 
 | method | path | body | notes |
 |---|---|---|---|
-| POST | `/api/auth/register` | `{username, password}` | 201 + session. Always creates a `user`; the admin seat is claimed separately |
+| POST | `/api/auth/register` | `{username, password}` | 201 + session. The first account on a relay with no accounts is `admin`; every later one is a `user` |
 | POST | `/api/auth/login` | `{username, password}` | 200 + session; 403 with `banned: true` when banned |
 | POST | `/api/auth/logout` | — | clears the cookie and destroys the session |
 | POST | `/api/auth/password` | `{current, next}` | other sessions of that account are dropped |
-| POST | `/api/auth/claim` | `{code}` | one-shot bootstrap: promotes the caller to `admin` while no admin exists |
+| POST | `/api/auth/claim` | `{code}` | fallback bootstrap: promotes the caller to `admin` while no admin exists (a vacant seat); 409 once one does |
 | POST | `/api/guest` | `{handle?, fp?}` | 201 + guest session; 403 when guest access is off |
 | GET | `/api/me` | — | `{me, settings, claimable, retentionHours, rooms[]}` |
 | GET/PUT/DELETE | `/api/sync-key` | `{enabled, blob}` | accounts only; the blob is an opaque sealed envelope |
