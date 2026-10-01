@@ -40,7 +40,7 @@
     msgs: [], online: [], ws: null, wsRetry: 0, canPost: false, frozen: false,
     settings: { allowNewRooms: true, guestAccess: true, allowRegistration: true, motd: '' },
     claimable: false, ttlMs: 48 * 3600e3,
-    lastAuthor: null, authMode: 'login', muted: false,
+    lastAuthor: null, authMode: 'login', muted: false, saidBye: false,
     maxFileBytes: 0, lastReset: null,
     flair: {}, adminTab: 'overview', adminData: null, activity: [], activityHasMore: false, eventFilter: '',
   };
@@ -911,7 +911,15 @@
     ws.onmessage = ev => { let m; try { m = JSON.parse(ev.data); } catch { return; } handleFrame(m); };
     ws.onclose = ev => {
       setConn('off');
-      if (ev.code === 1008) { toast(ev.reason || 'disconnected', 4200); refreshRooms(); return; }
+      if (ev.code === 1008) {
+        // The kick frame already said why in the user's words ("your account was
+        // deleted", "this room was closed"); the close reason is just the wire label.
+        // Saying it twice, as a bare "removed" toast, reads like a second error.
+        if (!state.saidBye) toast(ev.reason || 'disconnected', 4200);
+        state.saidBye = false;
+        refreshRooms();
+        return;
+      }
       const wait = Math.min(15000, 1000 * 2 ** Math.min(state.wsRetry++, 4));
       setTimeout(() => { if (state.ws === ws) connect(); }, wait);
     };
@@ -995,6 +1003,7 @@
       // Being moved out because the room itself was deleted needs no alarm: the client
       // lands in another room, and the banner would sit over it saying "room closed".
       if (m.reason !== 'room closed') banner(m.reason || 'removed', 'err');
+      state.saidBye = true;   // the banner is the explanation; the close handler stays quiet
       refreshRooms();
       return;
     }

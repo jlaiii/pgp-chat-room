@@ -264,7 +264,9 @@ function kickSockets(pred, reason) {
   for (const c of [...wss.clients]) {
     if (c.readyState !== 1 || !pred(c)) continue;
     try { c.send(JSON.stringify({ t: 'kick', reason })); } catch { /* ignore */ }
-    c.close(1008, 'removed');
+    // The close reason travels on the wire too, so keep it meaningful rather than a
+    // constant "removed" that shows up in a client's logs and toasts.
+    c.close(1008, String(reason || 'removed').slice(0, 100));
     n++;
   }
   return n;
