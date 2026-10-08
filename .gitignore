@@ -5,3 +5,4 @@ config.json
 *.key
 npm-debug.log*
 .DS_Store
+__pycache__/
