@@ -65,7 +65,9 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   shredded with it).
 - **Admin panel.** The hamburger menu's *Manage* section: dashboard, activity, **users**, rooms,
   bans & mutes, settings — one page per job. Freeze an account (lock the door: sessions dropped, sign-in
-  refused, data kept), close signups, stop new rooms, stop guests, **lock every room down with one switch**,
+  refused, data kept) or **panic-lock** it (the emergency stop: freeze plus a wipe of its whole
+  footprint — messages, key registrations, synced envelope, DM threads, blobs, social and member
+  lists), close signups, stop new rooms, stop guests, **lock every room down with one switch**,
   set a site-wide notice, push a relay notice into a room, **reset a password** (the generated one is
   shown once and never logged), sign an account out everywhere or revoke one session, delete an account
   (its rooms pass to the admin, its DMs and social traces are scrubbed, never orphaned), and watch
@@ -107,7 +109,7 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
 | the site notice text and which accounts wear which name effect | |
 | message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
-| the optional **sealed** key envelope (opaque; no password ever reaches the server) | |
+| the **sealed** key envelope (opaque; no password ever reaches the server) — always saved to the account, never detachable, replaced whole by a rotation | |
 
 Guest bans are **best-effort**: a guest is blocked by device fingerprint and IP, so clearing
 site data is a way around one. Bans against accounts are solid — their sessions are dropped
@@ -153,13 +155,15 @@ Rooms and Settings:
 |---|---|
 | **Dashboard** | live totals (online, keys, stored rows, attachments, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
 | **Activity** | the audit log: joins, leaves, keys, uploads, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` (admins) |
-| **Users** | every account as a card — role, sessions, key fingerprint, last sign-in — with search; **freeze/unfreeze**, promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban/unban, and — for the developer — the name-effect picker — plus every live session with a one-click revoke and an accounts export (admins) |
+| **Users** | every account as a card — role, sessions, key fingerprint, last sign-in — with search; **freeze/unfreeze**, **panic-lock** (freeze + wipe the relay's whole footprint of them), promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban/unban, and — for the developer — the name-effect picker — plus every live session with a one-click revoke and an accounts export (admins) |
 | **Rooms** | rename/about, **slow mode**, freeze, guest access, **attachments on/off**, take ownership, clear everyone out, clear stored ciphertext now, delete |
 | **Bans & mutes** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
 | **Settings** | allow new rooms, guests, signups; **pictures / video / other files / voice messages**; **who may delete and edit a message**; the **message lifetime**; the site notice; announcements; and **lockdown** |
 
 **Freeze** locks the account door: sessions are dropped and sign-in is refused until unfrozen.
-Messages, keys and room memberships are untouched — that is what **ban** is for.
+Messages, keys and room memberships are untouched — that is what **ban** is for. **Panic** is freeze
+plus the wipe described above; the door stays locked until someone unfreezes it, and the wiped data
+is unrecoverable by design.
 
 **Attachments** are switched on twice, on purpose: the site switch says which *kinds* may be sent at
 all, and each room says whether it accepts them. Neither is on by default. A file — or a voice note,
@@ -176,12 +180,23 @@ sealed with the same one-off AES-GCM key inside the message, and the pair's stor
 `data/dms/<a>__<b>/` — rows, read marks and blobs, swept by the same retention window and shredded
 when an account is deleted.
 
-**Key sync is on by default, and it is the account's key that syncs.** Registering saves the key to
-the account as a sealed envelope; signing in restores it onto the device, so the same key reads your
-history everywhere. The envelope is never overwritten, an account that holds no envelope gets the
-device's key saved up as a self-heal, and switching sync off in *Account* keeps it off — devices then
-start with their own key. The honest caveat is unchanged: a weak password can be attacked offline
-against a stolen envelope, so keep a backup file.
+**The account's key is synced, full stop.** Registering saves the key to the account as a sealed
+envelope; signing in restores it onto the device, so the same key reads your history everywhere. The
+envelope cannot be un-saved: there is no off switch and no opt-out to remember. The only way to change
+the key is deliberate — *Generate new key* in **Your key** makes a fresh key, verifies your password,
+stores the new envelope in the same write that drops the old one and pulls the old fingerprint from
+every room pool. The honest caveats are unchanged: a weak password can be attacked offline against a
+stolen envelope, so keep a backup file, and anything sealed to the old key stops opening for you the
+moment it rotates.
+
+**Panic** is the operator's emergency stop for an account, the bigger sibling of **freeze**. Freeze
+just locks the door (sessions dropped, sign-in refused, data kept). Panic locks the door *and* wipes
+the footprint: every message the account sent in every room, its key registrations and synced
+envelope, its direct-message threads and blobs, its places in everyone's social lists and room
+member lists — shredded in one move. Unfreezing later reopens the door, but none of it comes back.
+The audit log keeps one row saying it happened, and nobody is notified. The honest limit: room
+attachment blobs were never recorded with an owner, so those ride the retention window like everyone
+else's.
 
 **Lockdown** is the panic switch: freeze every room, stop new rooms, close signups and stop guests.
 Lifting it clears every freeze but deliberately leaves the switches where the lockdown left them —
@@ -238,7 +253,10 @@ owners, a ban drops the live socket, the first account on an empty relay seats t
 claim code stays the fallback for a vacated seat, the admin log is staff-only and never serves the
 claim code, lockdown closes the doors, slow mode throttles one identity but not staff, announcements
 are never stored as messages, account deletion hands over the rooms, an admin can burn a room's
-ciphertext on the spot, attachments stay off until both switches are on and round-trip byte for byte,
+ciphertext on the spot, the account key is synced or replaced and never un-synced (a rotation swaps
+envelope, binding and room pools in one write; a wrong password changes nothing), a panic-lock burns
+an account's footprint down to nothing but the audit row and unfreezing does not resurrect it,
+attachments stay off until both switches are on and round-trip byte for byte,
 voice notes ride their own site switch and the room gate, friends/requests/blocks behave in both
 directions, DMs deliver live as ciphertext and only to the two participants (guests are refused
 outright), blocking silences DMs and requests, deleting an account scrubs its threads and social

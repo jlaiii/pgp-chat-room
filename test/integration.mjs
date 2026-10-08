@@ -1074,42 +1074,145 @@ test('PGP Room relay — end to end', async t => {
     assert.equal((await admin('POST', '/api/admin/sessions', JSON.stringify({ id: 'deadbeef0000' }))).status, 404);
   });
 
-  await t.test('key sync: the envelope is owner-only, and turning it off sticks', async () => {
+  await t.test('the account key is synced or replaced — never un-synced', async () => {
     const c = makeClient();
     await c('POST', '/api/auth/register', JSON.stringify({ username: 'syncfan', password: 'sync-me-please-1' }));
     let me = await c('GET', '/api/me');
     assert.equal(me.body.me.syncKey, false, 'a fresh account starts with no envelope');
-    assert.equal(me.body.me.syncOptOut, false);
+    assert.ok(!('syncOptOut' in me.body.me), 'there is no opt-out field on the account contract any more');
     assert.equal((await c('GET', '/api/sync-key')).body.syncKey.enabled, false);
 
     const blob = 'A'.repeat(64);
-    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob }))).status, 200);
+    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ blob }))).status, 200);
     const got = await c('GET', '/api/sync-key');
     assert.equal(got.body.syncKey.enabled, true);
     assert.equal(got.body.syncKey.blob, blob, 'the envelope round-trips to its owner');
     me = await c('GET', '/api/me');
     assert.equal(me.body.me.syncKey, true);
-    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob: 'short' }))).status, 400, 'a junk blob is refused');
+    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ blob: 'short' }))).status, 400, 'a junk blob is refused');
 
     const g = makeClient();
     await g('POST', '/api/guest', JSON.stringify({ handle: 'g-sync-1' }));
     assert.equal((await g('GET', '/api/sync-key')).status, 403, 'guests have no account mailbox');
-    assert.equal((await g('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob }))).status, 403);
+    assert.equal((await g('PUT', '/api/sync-key', JSON.stringify({ blob }))).status, 403);
 
-    // Off is a choice: it survives the next sign-in instead of being quietly undone.
-    assert.equal((await c('DELETE', '/api/sync-key')).status, 200);
+    // Tied to the account: there is no detach, and the envelope survives the attempt.
+    assert.equal((await c('DELETE', '/api/sync-key')).status, 403, 'un-syncing is refused outright');
     me = await c('GET', '/api/me');
-    assert.equal(me.body.me.syncKey, false);
-    assert.equal(me.body.me.syncOptOut, true);
-    const again = makeClient();
-    await again('POST', '/api/auth/login', JSON.stringify({ username: 'syncfan', password: 'sync-me-please-1' }));
-    assert.equal((await again('GET', '/api/me')).body.me.syncOptOut, true, 'the opt-out is remembered across a sign-in');
+    assert.equal(me.body.me.syncKey, true, 'the envelope is still there');
+    assert.equal((await c('GET', '/api/sync-key')).body.syncKey.blob, blob);
+  });
 
-    // Turning it back on clears the flag.
-    assert.equal((await again('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob }))).status, 200);
-    me = await again('GET', '/api/me');
-    assert.equal(me.body.me.syncKey, true);
-    assert.equal(me.body.me.syncOptOut, false);
+  await t.test('rotating the key replaces envelope, binding and room pools in one step', async () => {
+    const K1 = await makeKey('rot-one');
+    const K2 = await makeKey('rot-two');
+    const c = makeClient();
+    await c('POST', '/api/auth/register', JSON.stringify({ username: 'rotator', password: 'rotate-me-123' }));
+    await c('POST', '/api/rooms/lounge/join');
+    assert.equal((await c('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: K1.fp, keyId: K1.keyId, handle: 'rotator', publicKey: K1.publicKey }))).status, 200);
+
+    // The normal upload carries the public half too: the binding lands with the envelope.
+    const blob1 = 'B'.repeat(64);
+    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ blob: blob1, fp: K1.fp, keyId: K1.keyId, publicKey: K1.publicKey }))).status, 200);
+    assert.equal((await c('GET', '/api/me')).body.me.keyFp, K1.fp, 'the uploaded key is bound immediately');
+    assert.ok((await c('GET', '/api/rooms/lounge/pool')).body.keys.some(k => k.fp === K1.fp), 'the old key sits in the pool');
+
+    // A wrong password changes nothing at all.
+    const blob2 = 'C'.repeat(64);
+    const denied = await c('POST', '/api/account/rotate-key', JSON.stringify({ password: 'not-my-password', blob: blob2, fp: K2.fp, keyId: K2.keyId, publicKey: K2.publicKey }));
+    assert.equal(denied.status, 401);
+    assert.equal((await c('GET', '/api/sync-key')).body.syncKey.blob, blob1, 'the old envelope is untouched');
+    assert.equal((await c('GET', '/api/me')).body.me.keyFp, K1.fp, 'the old binding is untouched');
+
+    // The real rotation: new envelope, new binding, old fingerprint out of every pool.
+    const rot = await c('POST', '/api/account/rotate-key', JSON.stringify({ password: 'rotate-me-123', blob: blob2, fp: K2.fp, keyId: K2.keyId, publicKey: K2.publicKey }));
+    assert.equal(rot.status, 200);
+    assert.equal(rot.body.keyFp, K2.fp);
+    assert.ok(rot.body.rooms >= 1, 'the old key was pulled from the room it was registered in');
+    assert.equal((await c('GET', '/api/sync-key')).body.syncKey.blob, blob2, 'the envelope is the new one');
+    assert.equal((await c('GET', '/api/me')).body.me.keyFp, K2.fp, 'the binding is the new one');
+    const pool = (await c('GET', '/api/rooms/lounge/pool')).body.keys;
+    assert.ok(!pool.some(k => k.fp === K1.fp), 'the old fingerprint is gone from the pool');
+    assert.equal((await c('POST', '/api/account/rotate-key', JSON.stringify({ password: 'rotate-me-123', blob: 'D'.repeat(8), fp: K2.fp, keyId: K2.keyId, publicKey: K2.publicKey }))).status, 400, 'a junk blob is refused');
+
+    // A stranger seals a DM to the rotated account: it goes to the new key.
+    const p = makeClient();
+    await p('POST', '/api/auth/register', JSON.stringify({ username: 'rotpal', password: 'rotpal-pass-12' }));
+    const th = await p('GET', '/api/dm/rotator');
+    assert.equal(th.status, 200);
+    assert.equal(th.body.publicKey, K2.publicKey, 'DMs encrypt to the new key');
+  });
+
+  await t.test('panic: the door locks and the footprint burns', async () => {
+    const P = await makeKey('panicky');
+    const W = await makeKey('watcher');
+    const vic = makeClient();
+    const wit = makeClient();
+    await vic('POST', '/api/auth/register', JSON.stringify({ username: 'panicky', password: 'panic-me-please-1' }));
+    await vic('POST', '/api/rooms/lounge/join');
+    assert.equal((await vic('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: P.fp, keyId: P.keyId, handle: 'panicky', publicKey: P.publicKey }))).status, 200);
+    await wit('POST', '/api/auth/register', JSON.stringify({ username: 'watcher', password: 'watch-me-123' }));
+    await wit('POST', '/api/rooms/lounge/join');
+    assert.equal((await wit('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: W.fp, keyId: W.keyId, handle: 'watcher', publicKey: W.publicKey }))).status, 200);
+
+    // The victim talks: a room message over the socket, and a DM.
+    const cp = await connect(vic.cookie());
+    cp.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: P.fp, handle: 'panicky' }));
+    await waitFor(cp.frames, f => f.t === 'welcome');
+    const ct = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: 'this line is about to be erased' }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: P.publicKey })],
+      signingKeys: P.priv,
+      format: 'armored',
+    });
+    cp.ws.send(JSON.stringify({ t: 'send', room: 'lounge', tmpId: 'pt1', ct, recipients: [P.fp] }));
+    await waitFor(cp.frames, f => f.t === 'msg' && f.m.tmpId === 'pt1', 5000, 'room echo');
+
+    await vic('POST', '/api/friends/request', JSON.stringify({ username: 'watcher' }));
+    await wit('POST', '/api/friends/accept', JSON.stringify({ username: 'panicky' }));
+    const dct = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: 'and this DM is about to be erased' }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: W.publicKey }), await openpgp.readKey({ armoredKey: P.publicKey })],
+      signingKeys: P.priv,
+      format: 'armored',
+    });
+    cp.ws.send(JSON.stringify({ t: 'dm', to: 'watcher', tmpId: 'pdm1', ct: dct }));
+    await waitFor(cp.frames, f => f.t === 'dm' && f.tmpId === 'pdm1', 5000, 'dm echo');
+    assert.equal((await vic('PUT', '/api/sync-key', JSON.stringify({ blob: 'D'.repeat(64), fp: P.fp, keyId: P.keyId, publicKey: P.publicKey }))).status, 200);
+
+    // Panic.
+    const pan = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'panicky', op: 'panic' }));
+    assert.equal(pan.status, 200);
+    assert.ok(pan.body.sessions >= 1, 'the session was dropped');
+    assert.ok(pan.body.rows >= 1, 'their room messages are gone');
+    assert.ok(pan.body.keys >= 1, 'their key registration is gone from the pool');
+    assert.ok(pan.body.dms.pairs >= 1 && pan.body.dms.messages >= 1, 'the DM thread and its rows are gone');
+
+    // The door: the session is dead and sign-in is refused — a freeze, exactly.
+    assert.equal((await vic('GET', '/api/me')).status, 401);
+    assert.equal((await makeClient()('POST', '/api/auth/login', JSON.stringify({ username: 'panicky', password: 'panic-me-please-1' }))).status, 403, 'frozen by the panic');
+
+    // The footprint: nothing of the name survives on disk except the audit's own
+    // record that it happened (and the account record itself, frozen and empty).
+    // Key files are written on a short debounce — give it a beat to land.
+    await sleep(1000);
+    const files = await readAllFiles(path.join(dir, 'data'));
+    const leaks = files.filter(([f, txt]) => !f.endsWith('events.log') && !f.endsWith('accounts.json') && txt.includes('panicky'));
+    assert.equal(leaks.length, 0, `no trace outside the audit: ${leaks.map(([f]) => f).join(', ')}`);
+
+    // The other side of the friendship: name gone, thread gone, no key to seal to.
+    assert.equal((await wit('GET', '/api/friends')).body.friends.length, 0);
+    assert.equal((await wit('GET', '/api/dm/panicky')).status, 409, 'there is no key left to seal to');
+
+    // Unfreeze reopens the door; signing in re-syncs a key; the wiped data stays wiped.
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'panicky', op: 'freeze', frozen: false }))).status, 200);
+    const back = makeClient();
+    assert.equal((await back('POST', '/api/auth/login', JSON.stringify({ username: 'panicky', password: 'panic-me-please-1' }))).status, 200, 'sign-in works again after unfreeze');
+    assert.equal((await back('PUT', '/api/sync-key', JSON.stringify({ blob: 'E'.repeat(64), fp: P.fp, keyId: P.keyId, publicKey: P.publicKey }))).status, 200);
+    assert.equal((await wit('GET', '/api/dm/panicky')).body.messages.length, 0, 'the thread did not come back');
+    const roomFiles = await readAllFiles(path.join(dir, 'data', 'rooms'));
+    assert.ok(!roomFiles.some(([, txt]) => txt.includes('panicky')), 'the wiped rows stay wiped');
+    cp.ws.close();
   });
 
   await t.test('the message lifetime is policy the admin can change at any time', async () => {

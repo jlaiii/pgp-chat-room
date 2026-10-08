@@ -393,8 +393,13 @@
     rw.append(document.createTextNode(state.me.kind === 'guest' ? ' — guest' : ` — ${roleChipText(state.me.role)}`));
     $('btnClaimSheet').hidden = !(state.claimable && state.me.kind === 'account');
     applyMenuVisibility();
+    // The account key is not a toggle: it is either saved (and stays saved) or
+    // about to be. The only account-level action is a full rotation.
     $('syncRow').hidden = state.me.kind !== 'account';
-    $('syncToggle').checked = !!state.me.syncKey;
+    $('syncState').textContent = state.me.syncKey
+      ? 'saved to this account — every device signs in with this key'
+      : 'not saved yet — it is saved automatically the next time you sign in';
+    $('rotateWrap').hidden = state.me.kind !== 'account';
     // A name effect is per-account and mirrors the account record: the picker is
     // live for staff and for anyone the developer has unlocked; otherwise it stays
     // visible but locked, so nobody has to guess where the feature lives.
@@ -1668,18 +1673,19 @@
    * ever holds that sealed envelope.
    */
 
-  // Save this device's key to the account. Loud at registration (sync is part of the
-  // promise made there), quiet as a self-heal at sign-in when the account holds none.
-  // The failure is returned, not swallowed: "saved to your account" must not be a lie.
+  // Save this device's key to the account. Sync is part of what an account is —
+  // there is no toggle to check and no opt-out to respect. The envelope always
+  // goes up, and the public key is bound in the same call, so the account is
+  // DM-able the moment its key is saved. Loud at registration; quiet as a
+  // self-heal when the account holds no envelope yet. The failure is returned,
+  // not swallowed: "saved to your account" must not be a lie.
   async function syncKeyUp(password, { loud = false } = {}) {
     if (!password || !state.me || state.me.kind !== 'account') return { ok: false, reason: 'not-account' };
     if (state.me.syncKey) return { ok: true, already: true };
-    if (state.me.syncOptOut) return { ok: false, reason: 'opted-out' };
-    if ((state.settings || {}).keySyncDefault === false) return { ok: false, reason: 'site-off' };
     if (!state.id || !state.id.armoredPrivate) return { ok: false, reason: 'no-key' };
     try {
       const blob = await Identity.wrap(password, state.id.armoredPrivate);
-      await api('/api/sync-key', { method: 'PUT', body: { enabled: true, blob } });
+      await api('/api/sync-key', { method: 'PUT', body: { blob, fp: state.id.fp, keyId: state.id.keyId, publicKey: state.id.armoredPublic } });
       Identity.save({ owner: state.me.username });
       await loadMe();
       renderMe();
@@ -1687,7 +1693,7 @@
       return { ok: true };
     } catch (e) {
       // The account still works; the envelope is a second copy, not the only one.
-      if (loud) toast('Your key could not be saved to your account — turn key sync on from Account settings to retry.', 7000);
+      if (loud) toast('Your key could not be saved to your account — it is saved automatically the next time you sign in.', 7000);
       return { ok: false, reason: 'failed', error: e };
     }
   }
@@ -1744,30 +1750,31 @@
     } catch (e) { toast(e.message, 4200); }
   }
 
-  async function toggleSyncKey(on) {
-    if (!on) {
-      try {
-        await api('/api/sync-key', { method: 'DELETE' });
-        await loadMe();
-        renderMe();
-        toast('Key sync is off — the envelope was deleted, and it stays off until you turn it back on.', 5200);
-      } catch (e) { toast(e.message); }
-      return;
-    }
+  // Replace the account's key: made here, wrapped with the password, swapped in
+  // server-side in one write — old envelope erased, old fingerprint pulled from
+  // every room pool. Deliberately the only path away from an existing key; there
+  // is no un-sync switch because the key belongs to the account.
+  async function rotateKey() {
+    if (!state.me || state.me.kind !== 'account') return;
     const r = await dialog({
-      title: 'Sync this key to your account',
-      body: 'The private key is encrypted here, in this browser, with a key derived from your password (PBKDF2 250k rounds, AES-GCM). The server keeps that sealed envelope and cannot open it — but a weak password could be attacked offline, so keep a backup file as well.',
+      title: 'Generate a new key?',
+      body: 'A new key is made in this browser and replaces the old one on your account — the old key and its saved envelope are erased. Anything encrypted to the old key (earlier room history, direct messages) will no longer open for you; people who could read those words still can. Other devices pick the new key up the next time they sign in. Download a fresh backup afterwards.',
       fields: [{ name: 'password', label: 'Your account password', type: 'password' }],
-      confirm: 'Encrypt and save',
+      confirm: 'Generate new key',
+      danger: true,
     });
-    if (!r || !r.password) { $('syncToggle').checked = false; return; }
+    if (!r || !r.password) return;
     try {
-      const blob = await Identity.wrap(r.password, state.id.armoredPrivate);
-      await api('/api/sync-key', { method: 'PUT', body: { enabled: true, blob } });
+      const gen = await Identity.generate(state.me.username);
+      const blob = await Identity.wrap(r.password, gen.armoredPrivate);
+      await api('/api/account/rotate-key', { method: 'POST', body: { password: r.password, blob, fp: gen.fp, keyId: gen.keyId, publicKey: gen.armoredPublic } });
+      state.id = await Identity.adoptPrivate(gen.armoredPrivate, state.me.username, state.me.username);
       await loadMe();
       renderMe();
-      toast('Key synced — a new device can unlock it with your password');
-    } catch (e) { toast(e.message, 4200); }
+      if (state.room) await registerKey();   // the open room hears the new fingerprint right away
+      await openKeySheet();                  // and the sheet shows the new fingerprint, not the old one
+      toast('New key in place — the old one was erased from your account', 5600);
+    } catch (e) { toast(e.message, 4600); }
   }
 
   async function signOut() {
@@ -1974,7 +1981,8 @@
     if (t === 'login') return { k: 'auth', s: `${e.username} signed in` };
     if (t === 'login-failed') return { k: 'bad', s: `failed sign-in for “${e.username}”${e.reason === 'frozen' ? ' (account frozen)' : ''}` };
     if (t === 'password-change') return { k: 'auth', s: `${e.username} changed their password` };
-    if (t === 'sync-key') return { k: 'key', s: `${e.username} turned key sync ${e.enabled ? 'on' : 'off'}` };
+    if (t === 'sync-key') return { k: 'key', s: `${e.username}'s key was saved to their account${e.key ? ` (${e.key})` : ''}` };
+    if (t === 'key-rotate') return { k: 'key', s: `${e.username} rotated their key (${e.old || 'none'} → ${e.next})` };
     if (t === 'ban') return { k: 'ban', s: `${e.by} banned ${e.target}${e.room ? ` from ${e.room}` : ' site-wide'} · ${e.hours ? `${e.hours}h` : 'permanent'}${e.reason ? ` · ${e.reason}` : ''}` };
     if (t === 'unban') return { k: 'ban', s: `${e.by || 'staff'} lifted a ban` };
     if (t === 'role') return { k: 'admin', s: `${e.by} made ${e.target} a ${e.role}` };
@@ -1987,6 +1995,7 @@
       if (e.op === 'signout') return { k: 'admin', s: `${e.by} signed ${e.target} out of every device` };
       if (e.op === 'delete') return { k: 'admin', s: `${e.by} deleted the account ${e.target}` };
       if (e.op === 'freeze') return { k: 'admin', s: `${e.by} ${e.frozen ? 'froze' : 'unfroze'} the account ${e.target}` };
+      if (e.op === 'panic') return { k: 'admin', s: `${e.by} panic-locked ${e.target} — ${e.rows} message${e.rows === 1 ? '' : 's'}, ${e.dmPairs} DM thread${e.dmPairs === 1 ? '' : 's'}, ${e.keys} key registration${e.keys === 1 ? '' : 's'} wiped` };
       if (e.op === 'guest-purge') return { k: 'admin', s: `${e.by} cleared ${e.sessions} guest session${e.sessions === 1 ? '' : 's'}` };
       return { k: 'admin', s: `${e.by} ran ${e.op}` };
     }
@@ -2284,6 +2293,23 @@
             toast(`New password ready for ${a.username}`);
           } catch (e) { toast(e.message, 4200); }
         };
+        // The emergency stop: lock the door, then burn the footprint. Frozen +
+        // sessions out + every trace the relay keeps of them, gone in one move.
+        const panic = el('button', 'btn sm danger', 'Panic');
+        panic.onclick = async () => {
+          const ok = await dialog({
+            title: `Panic-lock ${a.username}?`,
+            body: 'The emergency stop. They are signed out everywhere and frozen, and the relay wipes their footprint: the messages they sent in every room, their key registrations and synced key envelope, their direct-message threads and blobs, and their places in everyone\'s lists. Unfreezing later reopens the door, but none of the wiped data comes back. Nothing is announced and nobody is told.',
+            confirm: 'Lock and wipe',
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'panic' } });
+            toast(`${a.username} panic-locked · ${r.sessions} session${r.sessions === 1 ? '' : 's'} out · ${r.rows} message${r.rows === 1 ? '' : 's'} · ${r.dms.pairs} DM thread${r.dms.pairs === 1 ? '' : 's'} wiped`, 6200);
+            await renderPage();
+          } catch (e) { toast(e.message, 4200); }
+        };
         const del = el('button', 'btn sm danger', 'Delete');
         del.onclick = async () => {
           const ok = await dialog({ title: `Delete ${a.username}?`, body: 'The account is removed, their sessions are dropped and any room they owned passes to you. This cannot be undone.', confirm: 'Delete', danger: true });
@@ -2291,7 +2317,7 @@
           try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'delete' } }); toast(`${a.username} deleted${r.rooms.length ? ` · took over ${r.rooms.join(', ')}` : ''}`); await refreshAdmin(); }
           catch (e) { toast(e.message, 4200); }
         };
-        actions.append(out, pw, del);
+        actions.append(out, pw, panic, del);
       }
 
       if (dev && a.username !== me.username) {
@@ -2876,7 +2902,7 @@
       try { await navigator.clipboard.writeText(state.id.fp); toast('Fingerprint copied'); }
       catch { toast('Copy failed — select the text instead'); }
     };
-    $('syncToggle').onchange = e => toggleSyncKey(e.target.checked);
+    $('rotateKey').onclick = rotateKey;
     $('btnChangePw').onclick = changePassword;
 
     $('rsFreeze').onclick = () => patchRoom({ frozen: !$('rsFrozen').checked });

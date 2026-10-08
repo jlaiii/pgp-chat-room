@@ -20,9 +20,10 @@ does not match `Host` is rejected with 403 before it is routed.
 | POST | `/api/guest` | `{handle?, fp?}` | 201 + guest session; 403 when guest access is off |
 | GET | `/api/me` | — | `{me, settings, claimable, retentionHours, fx, effects, rooms[]}` (`effects` is the name-effect list; `fx` is the account→effect map) |
 | POST | `/api/me/fx` | `{fx}` | the caller's own name effect. Staff, or any account the developer unlocked (`fxAllowed`); `null` clears |
-| GET/PUT/DELETE | `/api/sync-key` | `{enabled, blob}` | accounts only; the blob is an opaque sealed envelope. DELETE is an explicit opt-out (`syncOptOut`), so sign-in does not auto re-upload |
+| GET/PUT | `/api/sync-key` | `{blob, fp?, keyId?, publicKey?}` | accounts only; the blob is an opaque sealed envelope, saved to the account and never detachable. When the public half rides along it binds the account's DM key in the same step. `DELETE` is refused — the only way past a synced key is a rotation |
+| POST | `/api/account/rotate-key` | `{password, blob, fp, keyId, publicKey}` | replaces the account's key in one write: the password re-verifies, the new envelope is stored as the old one drops, and the old fingerprint is pulled from every room pool before the response |
 
-`me` carries `{kind, username, handle, role, keyFp, syncKey, syncOptOut, fx, fxAllowed, createdAt}` where
+`me` carries `{kind, username, handle, role, keyFp, syncKey, fx, fxAllowed, createdAt}` where
 `role` ∈ `guest | user | mod | admin | developer`. `fx` is the map of which account wears which name
 effect — a rendering hint, never a permission.
 

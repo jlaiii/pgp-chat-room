@@ -50,7 +50,9 @@ const Identity = (() => {
     }
   }
 
-  async function create(handle, owner) {
+  // Mint a key without adopting it. Rotation uses this: the old key must stay in
+  // place, and working, until the server has accepted the new one.
+  async function generate(handle) {
     const name = handle || randomHandle();
     const gen = await openpgp.generateKey({
       type: 'curve25519',
@@ -58,14 +60,17 @@ const Identity = (() => {
       format: 'armored',
     });
     const privateKey = await openpgp.readPrivateKey({ armoredKey: gen.privateKey });
-    const id = {
+    return {
       handle: name, armoredPrivate: gen.privateKey, armoredPublic: gen.publicKey,
       fp: privateKey.getFingerprint().toLowerCase(), keyId: privateKey.getKeyID().toHex().toLowerCase(),
-      owner: owner || null,
-      createdAt: Date.now(),
     };
+  }
+
+  async function create(handle, owner) {
+    const g = await generate(handle);
+    const id = { ...g, owner: owner || null, createdAt: Date.now() };
     localStorage.setItem(LS, JSON.stringify(id));
-    return { ...id, privateKey, publicKeyObj: await openpgp.readKey({ armoredKey: gen.publicKey }) };
+    return { ...id, privateKey: await openpgp.readPrivateKey({ armoredKey: g.armoredPrivate }), publicKeyObj: await openpgp.readKey({ armoredKey: g.armoredPublic }) };
   }
 
   // Get the device key, creating one only when there is genuinely nothing to use.
@@ -145,5 +150,5 @@ const Identity = (() => {
     return v;
   }
 
-  return { LS, LS_PREFS, has, raw, load, ensure, create, save, backup, clear, adoptPrivate, fpOf, wrap, unwrap, prefs, pref, b64, unb64 };
+  return { LS, LS_PREFS, has, raw, load, ensure, create, generate, save, backup, clear, adoptPrivate, fpOf, wrap, unwrap, prefs, pref, b64, unb64 };
 })();

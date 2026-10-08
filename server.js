@@ -141,7 +141,6 @@ function meView(session) {
     kind: a.kind, username: a.username, handle: a.handle, role: a.role,
     keyFp: a.kind === 'account' ? (auth.get(a.username) || {}).keyFp || null : a.fp,
     syncKey: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncKey : false,
-    syncOptOut: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncOptOut : false,
     fx: a.kind === 'account' ? (auth.get(a.username) || {}).fx || null : null,
     fxAllowed: a.kind === 'account' ? !!(auth.get(a.username) || {}).fxAllowed : false,
     createdAt: session.createdAt,
@@ -621,7 +620,9 @@ async function handleRequest(req, res) {
       return send(res, 200, { ok: true, me: meView(auth.resolve(session)), fx: auth.fxMap() });
     }
 
-    // -- my synced key blob (opaque envelope; the server cannot open it) --
+    // -- my synced key blob (opaque envelope; the server cannot open it). Sync is
+    // tied to the account: uploads replace the envelope, and there is no detach —
+    // the only way past a synced key is /api/account/rotate-key.
     if (p === '/api/sync-key') {
       if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
       if (method === 'GET') {
@@ -630,15 +631,44 @@ async function handleRequest(req, res) {
       }
       if (method === 'PUT' || method === 'POST') {
         const b = await readJson(req);
-        const r = auth.setSyncKey(actor.username, b.enabled !== false, b.blob);
+        const r = auth.setSyncKey(actor.username, b.blob);
         if (r.error) return fail(res, 400, r.error);
-        event('sync-key', { username: actor.username, enabled: !!b.enabled });
-        return send(res, 200, { ok: true, syncKey: r.syncKey, syncOptOut: r.syncOptOut });
+        // The upload also (re)binds the public key the envelope holds: the account
+        // can then be DMed the moment its key is saved, not only after a room join.
+        let bound = false;
+        if (b.fp) {
+          if (!FP_RE.test(String(b.fp).toLowerCase())) return fail(res, 400, 'bad fingerprint');
+          const bk = auth.bindKey(actor.username, String(b.fp).toLowerCase(), { keyId: b.keyId, publicKey: b.publicKey });
+          if (bk.error) return fail(res, 400, bk.error);
+          bound = !bk.unchanged;
+        }
+        event('sync-key', { username: actor.username, key: b.fp ? String(b.fp).slice(0, 8) : null });
+        return send(res, 200, { ok: true, syncKey: r.syncKey, keyFp: String(b.fp || '').toLowerCase().slice(0, 8) || null, bound });
       }
       if (method === 'DELETE') {
-        const r = auth.setSyncKey(actor.username, false);
-        return send(res, 200, { ok: true, syncKey: { enabled: false }, syncOptOut: r.syncOptOut });
+        // Refused on purpose: the envelope is part of the account now. To replace
+        // the key, generate a new one — the old envelope is erased in that same step.
+        return fail(res, 403, 'key sync is tied to the account — generate a new key to replace it');
       }
+    }
+
+    // -- rotate my key: a brand-new key replaces the old one everywhere it lived.
+    // The password re-verifies here (it also wrapped the new envelope in the
+    // browser), the new envelope is stored in the same write that drops the old
+    // one, and the old fingerprint stops being a recipient in every room before
+    // this response goes out.
+    if (p === '/api/account/rotate-key' && method === 'POST') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      if (!rateOk(ip, 'rotate', (CFG.rate && CFG.rate.rotatePerMin) || 6)) return fail(res, 429, 'slow down');
+      const b = await readJson(req);
+      if (!auth.verify(actor.username, String(b.password || ''))) return fail(res, 401, 'that password does not match');
+      const r = auth.rotateKey(actor.username, { blob: b.blob, fp: b.fp, keyId: b.keyId, publicKey: b.publicKey });
+      if (r.error) return fail(res, 400, r.error);
+      const touched = r.oldFp ? chat.removeKeyEverywhere(r.oldFp) : [];
+      for (const id of touched) broadcastRoomState(id, 'a member rotated their key');
+      event('key-rotate', { username: actor.username, old: r.oldFp ? r.oldFp.slice(0, 8) : null, next: r.fp.slice(0, 8) });
+      log('key-rotate', actor.username, `${r.oldFp ? r.oldFp.slice(0, 8) : 'none'}->${r.fp.slice(0, 8)}`, `rooms=${touched.length}`);
+      return send(res, 200, { ok: true, keyFp: r.fp, rooms: touched.length });
     }
 
     // -- rooms --
@@ -1259,13 +1289,46 @@ async function handleRequest(req, res) {
             log('account-op', frozen ? 'freeze' : 'unfreeze', target, `sessions=${r.sessionsDropped}`);
             return send(res, 200, { ok: true, frozen, sessions: r.sessionsDropped, sockets });
           }
+          if (op === 'panic') {
+            // Emergency stop. The door locks first, then the footprint burns:
+            // sessions out and the account frozen, the key binding unbound, room
+            // messages they authored and their key registrations pulled from every
+            // room, their name out of every room's member/mod/pending lists, DM
+            // threads and blobs shredded, their places in everyone's social lists
+            // gone, and the synced key envelope dropped. Unfreezing reopens the
+            // door — nothing else here comes back. The audit keeps the record that
+            // it happened and nothing else; nobody is notified.
+            const oldFp = rec.keyFp || null;
+            const fr = auth.setFrozen(target, true);
+            auth.clearSyncKey(target);
+            const wiped = chat.scrubAuthor(target, oldFp);
+            const dms = dm.dropUser(target);
+            social.removeUser(target);
+            auth.unbindKey(target);
+            // The name leaves the room lists too — member, mod, pending. A room they
+            // owned stays theirs (the room is not the account's personal data).
+            const touchedRooms = [];
+            for (const room of rooms.all()) {
+              const was = room.members.includes(target) || room.mods.includes(target) || room.pending.includes(target);
+              room.members = room.members.filter(u => u !== target);
+              room.mods = room.mods.filter(u => u !== target);
+              room.pending = room.pending.filter(u => u !== target);
+              if (was) touchedRooms.push(room.id);
+            }
+            if (touchedRooms.length) rooms.saveNow();
+            const sockets = kickSockets(c => c.__username === target, 'this account has been locked down');
+            for (const id of touchedRooms) broadcastRoomState(id, 'the room changed');
+            event('account-op', { op, target, by: actor.username, sessions: fr.sessionsDropped, sockets, rows: wiped.rows, keys: wiped.keys, dmPairs: dms.pairs, dmMessages: dms.messages, dmFiles: dms.files, rooms: touchedRooms.join(',') || null });
+            log('account-op', op, target, `sessions=${fr.sessionsDropped} rows=${wiped.rows} keys=${wiped.keys} dms=${dms.pairs}`);
+            return send(res, 200, { ok: true, frozen: true, sessions: fr.sessionsDropped, sockets, rows: wiped.rows, keys: wiped.keys, dms });
+          }
           if (op === 'reset-password') {
             // The new password is generated here, handed to the admin once, and never
             // logged. The synced envelope is dropped: it was wrapped with the old one.
             const temp = crypto.randomBytes(10).toString('base64url');
             const r = auth.setPassword(target, temp);
             if (r.error) return fail(res, 400, r.error);
-            auth.setSyncKey(target, false);
+            auth.clearSyncKey(target);
             const sessions = auth.dropSessionsFor(target);
             const sockets = kickSockets(c => c.__username === target, 'password reset by an admin');
             event('account-op', { op, target, by: actor.username, sessions, sockets });

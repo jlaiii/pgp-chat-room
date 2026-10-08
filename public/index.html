@@ -211,14 +211,15 @@
     <label class="btn file" for="restoreKey">Restore from backup</label>
     <input type="file" id="restoreKey" accept=".asc,.txt,.key" hidden>
   </div>
-  <label class="toggle-row" id="syncRow" hidden>
-    <input type="checkbox" id="syncToggle">
-    <span class="toggle-text">
-      <span class="toggle-label">Sync this key to my account</span>
-      <span class="hint">On by default: your key is saved to the account — an envelope this server cannot open — and restored when you sign in on another device. Turn it off to keep the key on this device only.</span>
-    </span>
-  </label>
-  <p class="note">Your private key is made in this browser and never leaves it in the clear. Sync stores a sealed copy on your account so your password can bring the key to a new device; the backup file is the copy nothing else can take away.</p>
+  <div class="kv" id="syncRow" hidden>
+    <div class="k">Account key</div>
+    <div class="v" id="syncState">—</div>
+    <p class="hint">Your key is made for the account and stays with it — it cannot be detached or left unsaved, and every device you sign in on uses this one key. The envelope on the server is sealed with your password; the backup file below is the copy nothing else can take away.</p>
+  </div>
+  <div class="actions" id="rotateWrap" hidden>
+    <button class="btn danger" id="rotateKey" type="button">Generate new key…</button>
+  </div>
+  <p class="note">Replacing the key is deliberate: a new key is generated here, the old one is erased from the server in the same step, and messages sealed to the old key stop opening for you. Everything else about the account stays.</p>
 </section>
 
 <section class="sheet" id="accountSheet" hidden aria-label="Account">
@@ -230,7 +231,7 @@
       <input class="input" id="pwNext" type="password" autocomplete="new-password" placeholder="new password">
       <button class="btn primary" id="btnChangePw" type="button">Update password</button>
     </div>
-    <p class="hint">Changing it signs out your other devices. If key sync is on, the envelope is re-wrapped with the new password.</p>
+    <p class="hint">Changing it signs out your other devices. The saved key envelope is re-wrapped with the new password automatically.</p>
   </div>
   <p class="note">Signing out ends this session only. Your key stays on this device so your history keeps working.</p>
   <div class="block" id="fxWrap" hidden>
@@ -343,7 +344,7 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="/vendor/openpgp.min.js?v=1"></script>
-<script src="/identity.js?v=3"></script>
-<script src="/app.js?v=24"></script>
+<script src="/identity.js?v=4"></script>
+<script src="/app.js?v=25"></script>
 </body>
 </html>

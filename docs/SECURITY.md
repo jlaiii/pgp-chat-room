@@ -24,7 +24,7 @@ change from the single-room build, and it is worth being precise about:
 | bans (target, scope, expiry, reason) | moderation | who was punished and why |
 | the audit trail in `events.log`: joins, leaves, key registrations, moderation actions, sign-in attempts | accountability — the whole point of moving presence out of a chat app and onto the site | an activity timeline. IPs are stored on auth events and served to admins only; mods get the same rows without them |
 | message metadata (id, seq, time, room, author handle + fingerprint, recipient fingerprints) | delivery and history | a social graph and timing pattern |
-| sync envelope (optional) | multi-device | an AES-GCM blob; useless without the password |
+| sync envelope (always saved) | multi-device | an AES-GCM blob; useless without the password |
 | attachment blobs (ciphertext, with size and timestamp) | file transfer through a relay that cannot read it | how many bytes were sent, when, and by whom — never what they are |
 | DM rows and blobs: which pair, times, sizes, read marks | one-to-one messaging | nothing readable — each row and blob is sealed to both participants; **DMs are never entered in the audit log** |
 | friend requests, friendships, blocks | the social list | who talks to whom exists as a graph in `social.json`; declining and blocking are silent by design |
@@ -71,15 +71,25 @@ says a message was deleted, and the metadata was already in the retention window
 - An unknown username still performs a scrypt derivation, so the response time does not disclose
   whether an account exists.
 - Changing a password invalidates that account's other sessions and re-wraps the synced envelope.
-- **Key sync is on by default and deliberately weak-by-design-dangerous:** the private key is encrypted in
-  the browser with PBKDF2(SHA-256, 250 000 rounds) → AES-256-GCM, and the server stores the
-  envelope. The key is saved to the account at registration (or claimed from the device that registers),
-  restored from the envelope at sign-in with the password you just typed, and never overwrites an
-  existing envelope. Switching it off in *Account* is remembered (`syncOptOut`), so a later sign-in
-  does not quietly re-upload. The server never receives the password, so it cannot open the
+- **The account's key is synced, full stop.** The private key is encrypted in the browser with
+  PBKDF2(SHA-256, 250 000 rounds) → AES-256-GCM, and the server stores the envelope. The key is saved
+  to the account the moment it exists, restored from the envelope at sign-in with the password you
+  just typed, and there is no un-sync: the envelope cannot be detached, deleted or opted out of
+  (`DELETE /api/sync-key` is refused, and the legacy `syncOptOut` flag is gone). The only way to
+  change the key is **rotation**: *Generate new key* makes a fresh key in the browser, re-verifies
+  the account password server-side, stores the new envelope in the same write that drops the old one,
+  and pulls the old fingerprint from every room pool so nothing new is ever sealed to a key that no
+  longer exists. Anything sealed to the old key stops opening for that account (people who could
+  read those words still can). The server never receives the password, so it cannot open the
   envelope — but a weak password can be attacked offline against a stolen envelope. The UI says so,
   and prompts to keep a backup file as well. Password sync is a convenience layer; the backup file
   is the real recovery path.
+- **Panic is the operator's emergency stop**, and it is honest about its reach: freeze + sessions
+  out + shred of everything the relay held of that account — room rows it authored, its key
+  registrations, DM threads and blobs, social links, room membership lists, the synced envelope and
+  the public-key binding. What it cannot reach: room attachment blobs, because the relay never
+  recorded which blob belongs to whom — those ride the retention window like everyone else's. The
+  audit keeps one row saying it happened; nothing else about it is anywhere.
 
 ## Authorization
 

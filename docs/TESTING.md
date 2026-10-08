@@ -19,8 +19,13 @@ mod), an announcement lands as a relay notice and never as a stored message, loc
 room and closes signups and guests while lifting it clears the freezes, slow mode throttles one
 identity but not staff, name effects are developer-managed (applied or unlocked, junk refused, and
 self-pick only when unlocked), the developer seat is box-set and above admin, an account can be
-signed out everywhere and deleted with its rooms handed over, and a room's ciphertext can be burned on
-the spot. Attachments have their own coverage: they stay off until the site switch for that kind and
+signed out everywhere and deleted with its rooms handed over, a room's ciphertext can be burned on
+the spot, the account key is synced or replaced and never un-synced (an un-sync attempt is refused, a
+rotation with a wrong password changes nothing while a real one swaps envelope, binding and room
+pools in one write and DMs encrypt to the new key), and a panic-lock locks the door and burns the
+footprint — sessions out, rows, key registration, DM thread, envelope, social graph and membership
+all gone, nothing left on disk outside the audit row, and unfreeze reopens the door without
+resurrecting anything. Attachments have their own coverage: they stay off until the site switch for that kind and
 the room switch are both on, the stored bytes round-trip exactly, strangers get nothing, the size cap
 refuses an oversize body unread, voice notes ride their own site switch and the room gate (and upload
 to DMs), a mute blocks posting without ending the session, a password reset

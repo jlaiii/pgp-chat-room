@@ -28,7 +28,7 @@ hash never touches a message and cannot decrypt anything.
 |---|---|
 | `server.js` | HTTP routing, static assets, security headers, WebSocket frames, presence, moderation *enforcement*, boot/migration |
 | `lib/util.js` | atomic writes, secure erase, cookies, ids/handles, regexes |
-| `lib/auth.js` | accounts (scrypt), sessions (30-day tokens), roles, bans (site-wide and per-room) |
+| `lib/auth.js` | accounts (scrypt), sessions (30-day tokens), roles, bans (site-wide and per-room), the account's key envelope and public-key binding — `rotateKey` swaps both in a single write, `clearSyncKey`/`unbindKey` back the operator flows |
 | `lib/rooms.js` | room registry, membership, `can(actor, action, room)` — **all permissions live here** so HTTP and WS cannot drift |
 | `lib/chat.js` | per-room key pools, per-room per-day ciphertext segments, sealed attachment blobs, retention shredder (rows and files), room teardown |
 | `lib/social.js` | friends, requests and blocks (`data/social.json`) — pure relationship state, no message data |
@@ -41,13 +41,13 @@ hash never touches a message and cannot decrypt anything.
 
 ```
 data/
-├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowVoice, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
-├── accounts.json                 [{username, salt, hash, scryptN, role, fx, fxAllowed, createdAt, lastLogin, keyFp, keyPub, keyId, syncKey, syncOptOut}]
+├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowVoice, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, adminClaim, createdAt}
+├── accounts.json                 [{username, salt, hash, scryptN, role, fx, fxAllowed, createdAt, lastLogin, keyFp, keyPub, keyId, syncKey}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
 ├── bans.json                     [{id, kind: account|fp|ip, target, room, until, mute, reason, by, at}]
 ├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles, slowMs}]
 ├── social.json                   {friends: {user: [user]}, requests: [{from, to, ts}], blocked: {user: [user]}}
-├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/fx/file/purge…), streamed live to staff sockets and served by the admin panel. **DMs and social actions are never written here**
+├── events.log                    append-only audit trail (join/leave/key/key-rotate/register/login/ban/role/settings/announce/lockdown/account-op/flair/fx/file/purge…), streamed live to staff sockets and served by the admin panel. **DMs and social actions are never written here**
 ├── rooms/
 │   └── <roomId>/
 │       ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
