@@ -166,7 +166,10 @@ plus the wipe described above; the door stays locked until someone unfreezes it,
 is unrecoverable by design.
 
 **Attachments** are switched on twice, on purpose: the site switch says which *kinds* may be sent at
-all, and each room says whether it accepts them. Neither is on by default. A file — or a voice note,
+all, and each room says whether it accepts them. Neither is on by default. The composer's clip and
+mic follow the *site* switches — when the room's own gate is the thing that is off, using the control
+says so: room mods get a one-tap “turn them on”, everyone else gets told exactly why not, and nothing
+ever disappears without an explanation. A file — or a voice note,
 which rides the same rails — is encrypted with a one-off AES-GCM key in the browser and uploaded as
 opaque bytes; the key is addressed to the room inside the same OpenPGP message as the caption. The
 relay can hand the blob back but can never open (or listen to) it. Two honest caveats: the kind
