@@ -23,6 +23,7 @@ const { WebSocketServer } = require('ws');
 const { FP_RE, HANDLE_RE, MSG_HEAD, now, parseCookies, serializeCookie, originAllowed, clampInt, uuid, randomHandle } = require('./lib/util');
 const { Settings } = require('./lib/settings');
 const { Auth, RANK } = require('./lib/auth');
+const { EFFECTS } = require('./lib/effects');
 const { Rooms, LOUNGE_ID } = require('./lib/rooms');
 const { Chat } = require('./lib/chat');
 
@@ -137,7 +138,8 @@ function meView(session) {
     keyFp: a.kind === 'account' ? (auth.get(a.username) || {}).keyFp || null : a.fp,
     syncKey: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncKey : false,
     syncOptOut: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncOptOut : false,
-    rainbow: a.kind === 'account' ? !!(auth.get(a.username) || {}).rainbow : false,
+    fx: a.kind === 'account' ? (auth.get(a.username) || {}).fx || null : null,
+    fxAllowed: a.kind === 'account' ? !!(auth.get(a.username) || {}).fxAllowed : false,
     createdAt: session.createdAt,
   };
 }
@@ -277,7 +279,7 @@ function kickSockets(pred, reason) {
 
 // Event types only an admin may read. Everything else in the log is staff-readable:
 // moving presence out of Telegram is only useful if mods can see the same trail.
-const ADMIN_ONLY_EVENTS = new Set(['settings', 'role', 'admin-claimed', 'admin-claim', 'lockdown', 'account-op', 'flair', 'claim-failed']);
+const ADMIN_ONLY_EVENTS = new Set(['settings', 'role', 'admin-claimed', 'admin-claim', 'lockdown', 'account-op', 'flair', 'fx', 'claim-failed']);
 const SECRET_EVENTS = new Set(['admin-claim']);   // the bootstrap code never leaves the box
 
 function tailEvents(bytes = 1024 * 1024) {
@@ -340,13 +342,13 @@ function activitySeries(days = 7) {
   return { days, buckets, byType24h, total24h, scanned: list.length };
 }
 
-/* ---------- cosmetic flair (the rainbow name) ---------- */
+/* ---------- cosmetic name effects ---------- */
 
-// A rendering hint only: it never touches keys, ciphertext or permissions. Sockets
-// carry it so live frames and history render the same way.
-function applyFlair(username, rainbow) {
-  for (const c of wss.clients) if (c.readyState === 1 && c.__username === username) c.__rainbow = !!rainbow;
-  const payload = JSON.stringify({ t: 'flair', username, rainbow: !!rainbow });
+// A rendering hint only: it never touches keys, ciphertext or permissions. The
+// payload carries fxAllowed so the target's own open tab can refresh its picker.
+function applyFx(username, fx, fxAllowed) {
+  for (const c of wss.clients) if (c.readyState === 1 && c.__username === username) c.__fx = fx || null;
+  const payload = JSON.stringify({ t: 'fx', username, fx: fx || null, fxAllowed: !!fxAllowed });
   for (const c of wss.clients) if (c.readyState === 1) { try { c.send(payload); } catch { /* ignore */ } }
 }
 
@@ -569,21 +571,24 @@ async function handleRequest(req, res) {
         retentionHours: chat.retentionHours,
         maxFileBytes: chat.maxFileBytes,
         serverTime: now(),
-        flair: auth.flairMap(),
+        fx: auth.fxMap(),
+        effects: EFFECTS,
         rooms: rooms.list(actor, liveFor),
       });
     }
 
-    // -- cosmetic flair: the rainbow name (admins only, own account only) --
-    if (method === 'POST' && p === '/api/me/flair') {
+    // -- cosmetic name effect: self-pick (staff, or anyone the developer unlocked) --
+    if (method === 'POST' && p === '/api/me/fx') {
       if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
-      if ((RANK[actor.role] ?? 0) < RANK.admin) return fail(res, 403, 'admins only');
+      const rec = auth.get(actor.username) || {};
+      if ((RANK[actor.role] ?? 0) < RANK.admin && !rec.fxAllowed) return fail(res, 403, 'the developer unlocks name effects for you first');
       const b = await readJson(req);
-      const r = auth.setFlair(actor.username, { rainbow: !!b.rainbow });
+      const fx = b.fx === null || b.fx === undefined || b.fx === '' ? null : String(b.fx);
+      const r = auth.setFx(actor.username, fx);
       if (r.error) return fail(res, 400, r.error);
-      applyFlair(actor.username, !!b.rainbow);
-      event('flair', { username: actor.username, rainbow: !!b.rainbow, by: actor.username });
-      return send(res, 200, { ok: true, me: meView(auth.resolve(session)), flair: auth.flairMap() });
+      applyFx(actor.username, r.account.fx, r.account.fxAllowed);
+      event('fx', { username: actor.username, fx: r.account.fx, by: actor.username });
+      return send(res, 200, { ok: true, me: meView(auth.resolve(session)), fx: auth.fxMap() });
     }
 
     // -- my synced key blob (opaque envelope; the server cannot open it) --
@@ -908,7 +913,7 @@ async function handleRequest(req, res) {
         const rows = auth.list().map(a => JSON.stringify({
           username: a.username, role: a.role, createdAt: a.createdAt, createdAtISO: new Date(a.createdAt).toISOString(),
           lastLogin: a.lastLogin, lastLoginISO: a.lastLogin ? new Date(a.lastLogin).toISOString() : null,
-          keyFp: a.keyFp, syncKey: a.syncKey, rainbow: a.rainbow, sessions: a.sessions, banned: !!a.ban,
+          keyFp: a.keyFp, syncKey: a.syncKey, fx: a.fx, fxAllowed: a.fxAllowed, sessions: a.sessions, banned: !!a.ban,
         }));
         return send(res, 200, rows.join('\n') + (rows.length ? '\n' : ''), {
           'Content-Type': 'application/x-ndjson; charset=utf-8',
@@ -948,7 +953,7 @@ async function handleRequest(req, res) {
             };
           }),
           activity: activitySeries(7),
-          flair: auth.flairMap(),
+          fx: auth.fxMap(),
           retentionHours: chat.retentionHours,
           lockdown: !!settings.data.lockdown,
         });
@@ -977,16 +982,27 @@ async function handleRequest(req, res) {
           const target = String(b.username || '').toLowerCase();
           const rec = auth.get(target);
           if (!rec) return fail(res, 404, 'no such account');
-          if (['user', 'mod', 'admin'].includes(String(b.role))) { /* ok */ } else return fail(res, 400, 'bad role');
+          const role = String(b.role);
+          // The developer seat exists to be above admin; it is set on the box, never
+          // minted over the wire (a stolen session must not be able to create one).
+          if (role === 'developer') return fail(res, 403, 'the developer seat is set on the box');
+          if (!['user', 'mod', 'admin'].includes(role)) return fail(res, 400, 'bad role');
           if (rec.username === actor.username) return fail(res, 400, 'you cannot change your own role');
-          const r = auth.setRole(target, String(b.role));
+          // Rank ladder: act on someone strictly below you, or demote a peer; never
+          // mint a rank above your own and never touch the developer.
+          const a = RANK[actor.role] ?? -1;
+          const t = RANK[rec.role] ?? -1;
+          const want = RANK[role] ?? -1;
+          const allowed = (t < a && want <= a) || (t === a && want < a && a < RANK.developer);
+          if (!allowed) return fail(res, 403, 'not allowed');
+          const r = auth.setRole(target, role);
           if (r.error) return fail(res, 400, r.error);
-          // The rainbow name is an admin badge: demotion takes it away.
-          if (String(b.role) !== 'admin' && rec.rainbow) { auth.setFlair(target, { rainbow: false }); applyFlair(target, false); }
-          event('role', { target, role: b.role, by: actor.username });
-          log('role', target, String(b.role), 'by', actor.username);
-          refreshActorSockets(target, String(b.role));
-          return send(res, 200, { ok: true, account: { username: target, role: b.role } });
+          // Name effects are the developer's to give and take; a role change leaves
+          // them alone (they are no longer an admin badge).
+          event('role', { target, role, by: actor.username });
+          log('role', target, role, 'by', actor.username);
+          refreshActorSockets(target, role);
+          return send(res, 200, { ok: true, account: { username: target, role } });
         }
 
         // One switch that closes the room: freeze everything, stop new rooms, stop
@@ -1026,22 +1042,28 @@ async function handleRequest(req, res) {
           return send(res, 200, { ok: true, rooms: ids.length, delivered });
         }
 
-        // Per-account actions. Admins are never a target: the seat cannot be removed
-        // by another admin, and nobody may act on themselves.
+        // Per-account actions. Admins and the developer are never a target: the seat
+        // cannot be removed by another admin, and nobody may act on themselves.
         if (p === '/api/admin/account') {
           const target = String(b.username || '').toLowerCase();
           const rec = auth.get(target);
           if (!rec) return fail(res, 404, 'no such account');
           const op = String(b.op || '');
-          if (op === 'rainbow') {
-            const r = auth.setFlair(target, { rainbow: !!b.rainbow });
+          if (op === 'fx') {
+            // The developer hands out name effects — applied to someone, or unlocked so
+            // they pick their own. Cosmetic; it never touches keys or permissions.
+            if ((RANK[actor.role] ?? 0) < RANK.developer) return fail(res, 403, 'the developer sets name effects');
+            const fx = b.fx === null || b.fx === undefined || b.fx === '' ? null : String(b.fx);
+            const r = auth.setFx(target, fx);
             if (r.error) return fail(res, 400, r.error);
-            applyFlair(target, !!b.rainbow);
-            event('flair', { username: target, rainbow: !!b.rainbow, by: actor.username });
-            return send(res, 200, { ok: true, rainbow: !!b.rainbow, flair: auth.flairMap() });
+            const allow = auth.setFxAllowed(target, !!b.fxAllowed);
+            if (allow.error) return fail(res, 400, allow.error);
+            applyFx(target, r.account.fx, r.account.fxAllowed);
+            event('fx', { username: target, fx: r.account.fx, fxAllowed: !!r.account.fxAllowed, by: actor.username });
+            return send(res, 200, { ok: true, fx: r.account.fx, fxAllowed: !!r.account.fxAllowed, fxMap: auth.fxMap() });
           }
           if (rec.username === actor.username) return fail(res, 400, 'that is your own account');
-          if (rec.role === 'admin') return fail(res, 403, 'admins cannot be removed by other admins');
+          if (rec.role === 'admin' || rec.role === 'developer') return fail(res, 403, 'admin and developer seats are never a target');
           if (op === 'signout') {
             const sessions = auth.dropSessionsFor(target);
             const sockets = kickSockets(c => c.__username === target, 'signed out by an admin');

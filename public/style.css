@@ -108,6 +108,7 @@ textarea.input{min-height:70px;padding:10px 12px;line-height:1.45;resize:vertica
 .me span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .swatch{width:10px;height:10px;border-radius:50%;background:var(--mut);flex:0 0 auto}
 .role-chip{font-size:10.5px;padding:1px 6px;border-radius:99px;border:1px solid var(--line2);color:var(--mut)}
+.role-chip[data-role=developer]{color:#7dffc8;border-color:#1f4a3a;background:#0d241c}
 .role-chip[data-role=admin]{color:var(--gold);border-color:#5a4a24;background:#241d0e}
 .role-chip[data-role=mod]{color:var(--violet);border-color:#413a6b;background:#191735}
 .role-chip[data-role=user]{color:#a9b6c9;border-color:var(--line2);background:#161c24}
@@ -353,19 +354,187 @@ textarea.input{min-height:70px;padding:10px 12px;line-height:1.45;resize:vertica
 .badge.room{color:var(--violet);border-color:#3d386b}
 .badge.me{color:var(--acc);border-color:#26334d}
 
-/* ---------------- the rainbow name ---------------- */
+/* ---------------- name effects ---------------- */
 
-.rainbow-name{display:inline-flex;align-items:baseline}
-.rainbow-name i{
-  font-style:normal;display:inline-block;color:hsl(var(--rh) 88% 68%);
-  animation:rbWave 3.2s ease-in-out infinite;animation-delay:calc(var(--ri) * 90ms);
-}
-@keyframes rbWave{
+/* A name with an effect is split into per-letter elements so the effect can
+   stagger them. --i is the letter's index, --n the letter count, --c the
+   per-identity colour (the base every effect builds on or overrides). */
+.fx{display:inline-flex;align-items:baseline;letter-spacing:.01em}
+.fx i{font-style:normal;display:inline-block;color:var(--c,inherit)}
+
+/* rainbow — the original: a colour sweep travelling left to right */
+.fx-rainbow i{color:hsl(calc(var(--i) * 31deg) 88% 68%);animation:fxRainbow 3.2s ease-in-out infinite;animation-delay:calc(var(--i) * 90ms)}
+@keyframes fxRainbow{
   0%,100%{opacity:.42;filter:hue-rotate(0deg) brightness(.85)}
   30%{opacity:1;filter:hue-rotate(85deg) brightness(1.3)}
   60%{opacity:.62;filter:hue-rotate(-55deg) brightness(1.05)}
 }
-.msg .who.rainbow-name{letter-spacing:.01em}
+
+/* rgb — the whole name cycles smoothly through the spectrum */
+.fx-rgb i{animation:fxHue 2.6s linear infinite}
+@keyframes fxHue{from{filter:hue-rotate(0deg) brightness(1.3)}to{filter:hue-rotate(360deg) brightness(1.3)}}
+
+/* rgb-letters — every letter cycles on its own offset */
+.fx-rgb-letters i{animation:fxHueLetters 2.2s linear infinite;animation-delay:calc(var(--i) * -160ms)}
+@keyframes fxHueLetters{from{filter:hue-rotate(0deg) brightness(1.3)}to{filter:hue-rotate(360deg) brightness(1.3)}}
+
+/* jump — letters hop in sequence */
+.fx-jump i{animation:fxJump .95s ease-in-out infinite;animation-delay:calc(var(--i) * 80ms)}
+@keyframes fxJump{0%,55%,100%{transform:translateY(0)}25%{transform:translateY(-46%)}}
+
+/* wave — a smooth sine bob, staggered */
+.fx-wave i{animation:fxWave 1.7s ease-in-out infinite;animation-delay:calc(var(--i) * 95ms)}
+@keyframes fxWave{0%,100%{transform:translateY(14%)}50%{transform:translateY(-14%)}}
+
+/* shake — nervous jitter */
+.fx-shake i{animation:fxShake .55s linear infinite;animation-delay:calc(var(--i) * 35ms)}
+@keyframes fxShake{
+  0%,100%{transform:translate(0,0)}
+  20%{transform:translate(-11%,-6%)}
+  40%{transform:translate(9%,4%)}
+  60%{transform:translate(-7%,7%)}
+  80%{transform:translate(8%,-5%)}
+}
+
+/* pulse — smooth scale breathing */
+.fx-pulse i{animation:fxPulse 1.5s ease-in-out infinite;animation-delay:calc(var(--i) * 70ms)}
+@keyframes fxPulse{0%,100%{transform:scale(1);filter:brightness(1)}50%{transform:scale(1.22);filter:brightness(1.3)}}
+
+/* heartbeat — a double thump */
+.fx-heartbeat i{animation:fxBeat 1.7s ease-in-out infinite;animation-delay:calc(var(--i) * 55ms)}
+@keyframes fxBeat{0%,32%,100%{transform:scale(1)}12%{transform:scale(1.28)}22%{transform:scale(1.06)}}
+
+/* glow — the glow breathes around the letters */
+.fx-glow i{animation:fxGlow 2.1s ease-in-out infinite;animation-delay:calc(var(--i) * 110ms)}
+@keyframes fxGlow{
+  0%,100%{text-shadow:0 0 3px var(--c)}
+  50%{text-shadow:0 0 14px var(--c),0 0 24px var(--c);filter:brightness(1.35)}
+}
+
+/* neon — cyan tube with an irregular flicker */
+.fx-neon i{color:#8ff;animation:fxNeon 2.8s ease-in-out infinite;animation-delay:calc(var(--i) * 80ms)}
+@keyframes fxNeon{
+  0%,18%,22%,100%{text-shadow:0 0 4px #3ff,0 0 10px #0ff8;filter:brightness(1)}
+  20%{text-shadow:none;filter:brightness(.6)}
+  55%{text-shadow:0 0 9px #6ff,0 0 22px #0ff;filter:brightness(1.5)}
+}
+
+/* flicker — a loose bulb */
+.fx-flicker i{animation:fxFlicker 2.4s linear infinite;animation-delay:calc(var(--i) * 170ms)}
+@keyframes fxFlicker{
+  0%,7%,11%,32%,36%,100%{opacity:1}
+  8%,10%,33%,35%{opacity:.25;filter:brightness(1.6)}
+}
+
+/* blink — a staggered hard blink */
+.fx-blink i{animation:fxBlink 1.25s ease infinite;animation-delay:calc(var(--i) * 130ms)}
+@keyframes fxBlink{0%,49%{opacity:1}50%,99%{opacity:.12}}
+
+/* fade — letters fade through in sequence */
+.fx-fade i{animation:fxFade 2.9s ease-in-out infinite;animation-delay:calc(var(--i) * 150ms)}
+@keyframes fxFade{0%,12%{opacity:.12}30%,78%{opacity:1}95%,100%{opacity:.12}}
+
+/* float — slow independent drift */
+.fx-float i{animation:fxFloat 3.4s ease-in-out infinite;animation-delay:calc(var(--i) * -210ms)}
+.fx-float i:nth-child(2n){animation-duration:4.1s}
+@keyframes fxFloat{0%,100%{transform:translateY(10%)}50%{transform:translateY(-12%)}}
+
+/* flip — every letter flips in 3D */
+.fx-flip i{animation:fxFlip 2.4s ease-in-out infinite;animation-delay:calc(var(--i) * 95ms)}
+@keyframes fxFlip{0%,20%{transform:perspective(300px) rotateY(0)}50%{transform:perspective(300px) rotateY(360deg)}80%,100%{transform:perspective(300px) rotateY(360deg)}}
+
+/* spin — letters rotate in place */
+.fx-spin i{animation:fxSpin 1.9s linear infinite;animation-delay:calc(var(--i) * 130ms)}
+@keyframes fxSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+/* swing — letters swing from the top */
+.fx-swing i{animation:fxSwing 1.9s ease-in-out infinite;animation-delay:calc(var(--i) * 105ms);transform-origin:top center}
+@keyframes fxSwing{0%,100%{transform:rotate(12deg)}50%{transform:rotate(-12deg)}}
+
+/* bounce — a bouncy landing with squash */
+.fx-bounce i{animation:fxBounce .95s cubic-bezier(.3,.7,.4,1) infinite;animation-delay:calc(var(--i) * 85ms)}
+@keyframes fxBounce{
+  0%,100%{transform:translateY(0) scaleY(1)}
+  18%{transform:translateY(-52%) scaleY(1.06)}
+  42%{transform:translateY(0) scaleY(.82)}
+  62%{transform:translateY(-18%) scaleY(1)}
+  78%{transform:translateY(0) scaleY(.92)}
+}
+
+/* typewriter — letters appear one by one, hold, repeat */
+.fx-typewriter i{animation:fxType 3.4s steps(1) infinite;animation-delay:calc(var(--i) * 160ms)}
+@keyframes fxType{0%{opacity:0}4%,88%{opacity:1}92%,100%{opacity:0}}
+
+/* glitch — RGB-split hop */
+.fx-glitch i{animation:fxGlitch 1.9s linear infinite;animation-delay:calc(var(--i) * 90ms)}
+@keyframes fxGlitch{
+  0%,100%{transform:none;text-shadow:1px 0 #f0f6,-1px 0 #0ff6}
+  8%{transform:translate(-3%,0) skewX(-12deg);text-shadow:3px 0 #f008,-3px 0 #0ff8}
+  16%{transform:none}
+  24%{transform:translate(2%,0);text-shadow:-4px 0 #f009,4px 0 #0ff9;filter:contrast(1.4)}
+  32%{transform:none;filter:none}
+  66%{transform:translate(0,-6%) skewX(9deg)}
+  74%{transform:none}
+}
+
+/* matrix — green code-rain shimmer */
+.fx-matrix i{color:#7f9;text-shadow:0 0 6px #0f04;animation:fxMatrix 2.1s ease-in-out infinite;animation-delay:calc(var(--i) * 145ms)}
+@keyframes fxMatrix{
+  0%{opacity:0;transform:translateY(-38%)}
+  22%{opacity:1;transform:translateY(0)}
+  86%{opacity:1}
+  95%,100%{opacity:0;transform:translateY(14%)}
+}
+
+/* gold — a golden shimmer */
+.fx-gold i{background:linear-gradient(100deg,#8a6a1f,#ffd76a 40%,#fff3c4 50%,#ffd76a 60%,#8a6a1f);background-size:220% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:fxShimmer 2.6s ease-in-out infinite;animation-delay:calc(var(--i) * 120ms)}
+/* chrome — silver metallic */
+.fx-chrome i{background:linear-gradient(100deg,#6d7681,#e8edf4 45%,#fff 50%,#c8d0da 55%,#6d7681);background-size:230% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:fxShimmer 3.1s ease-in-out infinite;animation-delay:calc(var(--i) * 130ms)}
+@keyframes fxShimmer{0%{background-position:120% 0;filter:brightness(.95)}50%{background-position:13% 0;filter:brightness(1.25)}100%{background-position:-120% 0;filter:brightness(.95)}}
+
+/* ice — frosted blue shimmer */
+.fx-ice i{color:#bfe9ff;animation:fxIce 2.7s ease-in-out infinite;animation-delay:calc(var(--i) * 115ms)}
+@keyframes fxIce{
+  0%,100%{text-shadow:0 0 5px #9df8;filter:brightness(1)}
+  50%{text-shadow:0 0 13px #cff,0 0 24px #9df6;filter:brightness(1.35) saturate(1.2)}
+}
+
+/* fire — embers rising */
+.fx-fire i{animation:fxFire 1.5s ease-in-out infinite;animation-delay:calc(var(--i) * -170ms)}
+@keyframes fxFire{
+  0%,100%{transform:translateY(8%) scaleY(.94);color:#ff6a2a;text-shadow:0 0 7px #ff4500aa}
+  50%{transform:translateY(-9%) scaleY(1.06);color:#ffb347;text-shadow:0 0 12px #ff9500}
+}
+
+/* aurora — green-violet light drifting */
+.fx-aurora i{animation:fxAurora 3.6s ease-in-out infinite;animation-delay:calc(var(--i) * 160ms)}
+@keyframes fxAurora{
+  0%,100%{color:#7dffc8;text-shadow:0 0 8px #2affb855;filter:hue-rotate(0deg)}
+  50%{color:#c39bff;text-shadow:0 0 14px #b47dff66;filter:hue-rotate(40deg)}
+}
+
+/* hologram — iridescent shift with a lean */
+.fx-hologram i{animation:fxHolo 2.9s linear infinite;animation-delay:calc(var(--i) * 100ms)}
+@keyframes fxHolo{
+  0%{transform:skewX(-9deg);filter:hue-rotate(0deg);opacity:.85}
+  50%{transform:skewX(9deg);filter:hue-rotate(160deg);opacity:1}
+  100%{transform:skewX(-9deg);filter:hue-rotate(320deg);opacity:.85}
+}
+
+/* sparkle — twinkling */
+.fx-sparkle i{animation:fxSparkle 1.7s ease-in-out infinite;animation-delay:calc(var(--i) * 190ms)}
+.fx-sparkle i:nth-child(3n){animation-duration:2.3s}
+@keyframes fxSparkle{0%,100%{filter:brightness(1);opacity:.85}50%{filter:brightness(1.9);opacity:1;text-shadow:0 0 10px var(--c)}}
+
+/* ghost — soft waft in and out of focus */
+.fx-ghost i{animation:fxGhost 3.4s ease-in-out infinite;animation-delay:calc(var(--i) * 140ms)}
+@keyframes fxGhost{0%,100%{opacity:.28;filter:blur(.6px)}55%{opacity:.95;filter:blur(0)}}
+
+/* warp — letters lean through a wave */
+.fx-warp i{animation:fxWarp 2.3s ease-in-out infinite;animation-delay:calc(var(--i) * 110ms)}
+@keyframes fxWarp{0%,100%{transform:skewX(-14deg) scaleY(1.04)}50%{transform:skewX(14deg) scaleY(.94)}}
+
+.msg .who.fx{letter-spacing:.01em}
 
 /* ---------------- wider screens ---------------- */
 

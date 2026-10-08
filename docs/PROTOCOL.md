@@ -18,12 +18,13 @@ does not match `Host` is rejected with 403 before it is routed.
 | POST | `/api/auth/password` | `{current, next}` | other sessions of that account are dropped |
 | POST | `/api/auth/claim` | `{code}` | fallback bootstrap: promotes the caller to `admin` while no admin exists (a vacant seat); 409 once one does |
 | POST | `/api/guest` | `{handle?, fp?}` | 201 + guest session; 403 when guest access is off |
-| GET | `/api/me` | — | `{me, settings, claimable, retentionHours, flair, rooms[]}` |
-| POST | `/api/me/flair` | `{rainbow}` | admin only: the cosmetic rainbow name, own account only |
+| GET | `/api/me` | — | `{me, settings, claimable, retentionHours, fx, effects, rooms[]}` (`effects` is the name-effect list; `fx` is the account→effect map) |
+| POST | `/api/me/fx` | `{fx}` | the caller's own name effect. Staff, or any account the developer unlocked (`fxAllowed`); `null` clears |
 | GET/PUT/DELETE | `/api/sync-key` | `{enabled, blob}` | accounts only; the blob is an opaque sealed envelope. DELETE is an explicit opt-out (`syncOptOut`), so sign-in does not auto re-upload |
 
-`me` carries `{kind, username, handle, role, keyFp, syncKey, syncOptOut, rainbow, createdAt}`. `flair` is the
-map of which handles render with the animated name — a rendering hint, never a permission.
+`me` carries `{kind, username, handle, role, keyFp, syncKey, syncOptOut, fx, fxAllowed, createdAt}` where
+`role` ∈ `guest | user | mod | admin | developer`. `fx` is the map of which account wears which name
+effect — a rendering hint, never a permission.
 
 ## Rooms
 
@@ -66,7 +67,7 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 | GET | `/api/admin/events/export` | the same trail as an `application/x-ndjson` download (admin) |
 | POST | `/api/admin/announce` | `{room: "<id>"\|"all", text}` (admin) — pushes a `sys` notice frame; never stored, never encrypted |
 | POST | `/api/admin/lockdown` | `{on}` (admin) — freezes every room; `on` also stops new rooms, signups and guests. Lifting clears the freezes but leaves the switches where they were |
-| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, rainbow, reset-password`. `reset-password` returns a generated password **once**, drops their sessions and clears the synced envelope (it was wrapped with the old one). Admins are never a target and you cannot act on yourself |
+| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, fx, reset-password`. `fx` (`{fx, fxAllowed}`) is **developer-only**: apply a name effect and/or unlock self-pick. `reset-password` returns a generated password **once**, drops their sessions and clears the synced envelope (it was wrapped with the old one). Admin and developer seats are never a target and you cannot act on yourself |
 | POST | `/api/admin/guests` | clears every guest session (admin) |
 | POST | `/api/admin/purge` | `{room}` (admin) — shreds that room's stored ciphertext now, disk and memory |
 
@@ -99,7 +100,7 @@ Server → client:
 {"t":"err","msg":"this room is frozen"}                    // also used for informational notices
 {"t":"kick","reason":"you are banned from lounge until 2026-10-01 04:12Z"}
 {"t":"evt","e":{"t":1790…,"type":"join","room":"lounge",…}}  // staff only: the live admin log
-{"t":"flair","username":"jay","rainbow":true}                // someone changed their name flair
+{"t":"fx","username":"jay","fx":"glitch"}                         // a name effect changed (null clears)
 {"t":"settings","settings":{…}}                              // policy changed; clients follow live
 {"t":"pong"}
 ```

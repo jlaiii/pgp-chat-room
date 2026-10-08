@@ -40,11 +40,11 @@ hash never touches a message and cannot decrypt anything.
 ```
 data/
 ├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
-├── accounts.json                 [{username, salt, hash, scryptN, role, rainbow, createdAt, lastLogin, keyFp, syncKey, syncOptOut}]
+├── accounts.json                 [{username, salt, hash, scryptN, role, fx, fxAllowed, createdAt, lastLogin, keyFp, syncKey, syncOptOut}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
 ├── bans.json                     [{id, kind: account|fp|ip, target, room, until, mute, reason, by, at}]
 ├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles, slowMs}]
-├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/file/purge…), streamed live to staff sockets and served by the admin panel
+├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/fx/file/purge…), streamed live to staff sockets and served by the admin panel
 └── rooms/
     └── <roomId>/
         ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
@@ -52,7 +52,7 @@ data/
         └── files/<id>.bin        one sealed attachment per file — bytes the relay cannot open
 ```
 
-`rainbow` and `slowMs` are cosmetic or policy fields — they never touch keys or ciphertext.
+`fx`/`fxAllowed` and `slowMs` are cosmetic or policy fields — they never touch keys or ciphertext.
 `events.log` holds metadata only, and the one secret that ever passes through it (`admin-claim`,
 the bootstrap code) is filtered out of every API path.
 

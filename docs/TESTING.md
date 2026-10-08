@@ -17,7 +17,8 @@ sign-in, the rate limiter, the retention sweep on restart, and the admin surface
 staff-only and never serves the bootstrap code (mods lose admin rows and IPs, the export refuses a
 mod), an announcement lands as a relay notice and never as a stored message, lockdown freezes every
 room and closes signups and guests while lifting it clears the freezes, slow mode throttles one
-identity but not staff, the rainbow flair is admin-only and dropped on demotion, an account can be
+identity but not staff, name effects are developer-managed (applied or unlocked, junk refused, and
+self-pick only when unlocked), the developer seat is box-set and above admin, an account can be
 signed out everywhere and deleted with its rooms handed over, and a room's ciphertext can be burned on
 the spot. Attachments have their own coverage: they stay off until the site switch for that kind and
 the room switch are both on, the stored bytes round-trip exactly, strangers get nothing, the size cap

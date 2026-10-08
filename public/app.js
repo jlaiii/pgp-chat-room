@@ -42,11 +42,23 @@
     claimable: false, ttlMs: 48 * 3600e3,
     lastAuthor: null, authMode: 'login', muted: false, saidBye: false,
     maxFileBytes: 0, lastReset: null,
-    flair: {}, adminTab: 'overview', adminData: null, activity: [], activityHasMore: false, eventFilter: '',
+    fx: {}, effects: [], adminTab: 'overview', adminData: null, activity: [], activityHasMore: false, eventFilter: '',
   };
 
-  const RANK = { guest: 0, user: 1, mod: 2, admin: 3 };
+  const RANK = { guest: 0, user: 1, mod: 2, admin: 3, developer: 4 };
   const rank = role => RANK[role] ?? -1;
+
+  // Human labels for the effect pickers; the names themselves are the wire format.
+  const FX_LABELS = {
+    rainbow: 'Rainbow sweep', rgb: 'RGB flash', 'rgb-letters': 'RGB letters',
+    jump: 'Jumping letters', wave: 'Wave', shake: 'Shake', pulse: 'Pulse', heartbeat: 'Heartbeat',
+    glow: 'Glow', neon: 'Neon', flicker: 'Flicker', blink: 'Blink', fade: 'Fade through',
+    float: 'Float', flip: 'Flip', spin: 'Spin', swing: 'Swing', bounce: 'Bounce',
+    typewriter: 'Typewriter', glitch: 'Glitch', matrix: 'Matrix', gold: 'Gold', chrome: 'Chrome',
+    ice: 'Ice', fire: 'Fire', aurora: 'Aurora', hologram: 'Hologram', sparkle: 'Sparkle',
+    ghost: 'Ghost', warp: 'Warp',
+  };
+  const fxLabel = n => FX_LABELS[n] || String(n || '').split('-').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
 
   /* ---------------- utilities ---------------- */
 
@@ -61,35 +73,42 @@
   const fpGroups = fp => (String(fp).match(/.{1,4}/g) || []).join(' ');
 
   // ---- display names ---------------------------------------------------------
-  // A name renders as plain text unless its account carries the rainbow flair. With
-  // flair on, every letter is its own element with its own hue and its own phase in
-  // the wave — the per-letter animation delay runs left to right, so the fade
-  // travels across the name instead of blinking as a block.
-  const rainbowOn = handle => !!state.flair[String(handle || '').toLowerCase()];
+  // A name renders as plain text unless its account carries a name effect. With an
+  // effect on, every letter is its own element with its own index (`--i`) so the
+  // effect can stagger letters; the effect itself is one CSS class, `.fx-<name>`.
+  const fxOn = handle => state.fx[String(handle || '').toLowerCase()] || null;
   function nameEl(handle, cls) {
     const text = String(handle || '');
     const node = el('span', cls || null);
     node.dataset.name = text.toLowerCase();
-    if (!rainbowOn(text)) { node.textContent = text; return node; }
-    node.classList.add('rainbow-name');
+    const fx = fxOn(text);
+    if (!fx) { node.textContent = text; return node; }
+    node.classList.add('fx', `fx-${fx}`);
+    node.dataset.fx = fx;
     const n = Math.max(1, text.length);
     for (let i = 0; i < text.length; i++) {
       const ch = el('i', null, text[i]);
-      ch.style.setProperty('--ri', String(i));
-      ch.style.setProperty('--rh', String(Math.round((i / n) * 360)));
+      ch.style.setProperty('--i', String(i));
+      ch.style.setProperty('--n', String(n));
       node.append(ch);
     }
     return node;
   }
 
-  // Flair can change while a room is open: swap every node that shows that name.
+  // The per-identity colour stays the base for every name; the effect may override it.
+  function paintName(node, color) {
+    node.dataset.color = color;
+    node.style.setProperty('--c', color);
+    if (!node.classList.contains('fx')) node.style.color = color;
+  }
+
+  // Effects can change while a room is open: swap every node that shows that name.
   function rerenderNames(username) {
     const name = String(username || '').toLowerCase();
     for (const old of [...document.querySelectorAll(`[data-name="${name}"]`)]) {
-      const keep = old.className.replace('rainbow-name', '').trim();
+      const keep = old.className.replace(/\bfx(?:-\S+)?\b/g, '').replace(/\s+/g, ' ').trim();
       const fresh = nameEl(name, keep || null);
-      if (old.dataset.color && !fresh.classList.contains('rainbow-name')) fresh.style.color = old.dataset.color;
-      if (old.dataset.color) fresh.dataset.color = old.dataset.color;
+      if (old.dataset.color) paintName(fresh, old.dataset.color);
       old.replaceWith(fresh);
     }
     renderPresence();
@@ -246,7 +265,8 @@
     state.rooms = meResp.rooms;
     state.settings = meResp.settings;
     state.claimable = meResp.claimable;
-    state.flair = meResp.flair || {};
+    state.fx = meResp.fx || {};
+    state.effects = meResp.effects || [];
     state.maxFileBytes = meResp.maxFileBytes || 0;
     state.ttlMs = ttlFrom(meResp.retentionHours);
     return meResp;
@@ -277,7 +297,8 @@
     state.me = meResp.me;
     state.settings = meResp.settings;
     state.claimable = meResp.claimable;
-    state.flair = meResp.flair || {};
+    state.fx = meResp.fx || {};
+    state.effects = meResp.effects || [];
     state.maxFileBytes = meResp.maxFileBytes || 0;
     state.ttlMs = ttlFrom(meResp.retentionHours);
     state.rooms = meResp.rooms;
@@ -340,7 +361,7 @@
 
   /* ---------------- me / rooms ---------------- */
 
-  const roleChipText = role => role === 'admin' ? 'Admin' : role === 'mod' ? 'Mod' : role === 'guest' ? 'Guest' : 'Member';
+  const roleChipText = role => role === 'developer' ? 'Developer' : role === 'admin' ? 'Admin' : role === 'mod' ? 'Mod' : role === 'guest' ? 'Guest' : 'Member';
 
   function renderMe() {
     if (!state.me) return;
@@ -359,13 +380,29 @@
     $('btnClaimSheet').hidden = !(state.claimable && state.me.kind === 'account');
     $('syncRow').hidden = state.me.kind !== 'account';
     $('syncToggle').checked = !!state.me.syncKey;
-    // Flair is an admin badge: only an admin sees the switch, and it mirrors the
-    // account record rather than anything stored on this device.
-    $('flairWrap').hidden = rank(state.me.role) < RANK.admin;
-    $('flairRainbow').checked = !!state.me.rainbow;
+    // A name effect is per-account and mirrors the account record: the picker is
+    // live for staff and for anyone the developer has unlocked; otherwise it stays
+    // visible but locked, so nobody has to guess where the feature lives.
+    $('fxWrap').hidden = state.me.kind !== 'account';
+    if (state.me.kind === 'account') renderFxPicker();
     $('railRoleNote').textContent = state.me.kind === 'guest'
       ? 'Guests can post in public rooms. Create an account to make your own rooms.'
       : '';
+  }
+
+  // The self-serve effect picker: live for staff and for accounts the developer has
+  // unlocked; visibly locked otherwise, so the feature is discoverable either way.
+  function renderFxPicker() {
+    const allowed = rank(state.me.role) >= RANK.admin || !!state.me.fxAllowed;
+    const sel = $('fxSelect');
+    sel.innerHTML = '';
+    const none = el('option', null, 'None'); none.value = ''; sel.append(none);
+    for (const name of state.effects) { const o = el('option', null, fxLabel(name)); o.value = name; sel.append(o); }
+    sel.value = state.me.fx || '';
+    sel.disabled = !allowed;
+    $('fxHint').textContent = allowed
+      ? 'Shown on your name for everyone in the room. Cosmetic only — nothing about your key or your messages changes.'
+      : 'Locked — the developer can apply an effect to your name, or unlock this picker for you.';
   }
 
   function roomBadge(r) {
@@ -728,8 +765,7 @@
     if (state.lastAuthor !== m.fp || tmpId || m.deleted) {
       const head = el('div', 'meta');
       const who = nameEl(m.handle || m.fp.slice(0, 8), 'who');
-      if (!who.classList.contains('rainbow-name')) who.style.color = colorFor(m.fp);
-      who.dataset.color = colorFor(m.fp);
+      paintName(who, colorFor(m.fp));
       head.append(who, timeEl(m.t));
       wrap.append(head);
     }
@@ -877,8 +913,7 @@
       const sw = el('span', 'sw');
       sw.style.background = colorFor(o.fp);
       const nm = nameEl(o.handle, null);
-      if (!nm.classList.contains('rainbow-name')) nm.style.color = colorFor(o.fp);
-      nm.dataset.color = colorFor(o.fp);
+      paintName(nm, colorFor(o.fp));
       chip.append(sw, nm);
       strip.append(chip);
     }
@@ -983,8 +1018,14 @@
     }
     if (m.t === 'sys') { addSys(m.text, m.ts || Date.now(), m.notice); scrollBottom(); return; }
     if (m.t === 'presence') { state.online = m.online || []; renderPresence(); return; }
-    if (m.t === 'flair') {
-      if (m.rainbow) state.flair[m.username] = true; else delete state.flair[m.username];
+    if (m.t === 'fx') {
+      if (m.fx) state.fx[m.username] = m.fx; else delete state.fx[m.username];
+      // If it is about me, my own record moved too: keep the picker honest live.
+      if (state.me && m.username === state.me.username) {
+        state.me.fx = m.fx || null;
+        if (typeof m.fxAllowed === 'boolean') state.me.fxAllowed = m.fxAllowed;
+        renderMe();
+      }
       rerenderNames(m.username);
       return;
     }
@@ -1039,8 +1080,7 @@
     wrap.dataset.tmpId = tmpId;
     const head = el('div', 'meta');
     const who = nameEl(state.me.handle, 'who');
-    if (!who.classList.contains('rainbow-name')) who.style.color = colorFor(state.id.fp);
-    who.dataset.color = colorFor(state.id.fp);
+    paintName(who, colorFor(state.id.fp));
     head.append(who, timeEl(Date.now()));
     const body = el('div', 'body');
     if (text) body.append(el('div', 'text', text));
@@ -1311,7 +1351,7 @@
   const EVENT_FILTERS = [
     ['', 'Everything'],
     ['join,leave,evict', 'Presence'],
-    ['register,guest,login,login-failed,password-change,sync-key,account-op,flair', 'People'],
+    ['register,guest,login,login-failed,password-change,sync-key,account-op,flair,fx', 'People'],
     ['room-create,room-update,room-delete,room-join,room-leave,member-op,room-purge,announce', 'Rooms'],
     ['ban,unban', 'Moderation'],
     ['settings,role,admin-claimed,lockdown', 'Admin'],
@@ -1350,7 +1390,7 @@
     let data;
     try { data = await api('/api/admin/overview'); } catch (e) { body.append(el('p', 'note', e.message)); return; }
     state.adminData = data;
-    state.flair = data.flair || state.flair;
+    state.fx = data.fx || state.fx;
     if (state.adminTab === 'activity') return renderActivityTab(body, data);
     if (state.adminTab === 'people') return renderPeopleTab(body, data);
     if (state.adminTab === 'rooms') return renderRoomsTab(body, data);
@@ -1421,6 +1461,7 @@
     if (t === 'settings') return { k: 'admin', s: `${e.by} changed the site settings` };
     if (t === 'admin-claimed') return { k: 'admin', s: `${e.username} took the admin seat` };
     if (t === 'lockdown') return { k: 'admin', s: `${e.by} turned lockdown ${e.on ? 'on' : 'off'}` };
+    if (t === 'fx') return { k: 'me', s: `${e.username} ${e.fx ? `wears the ${fxLabel(e.fx)} name effect` : 'cleared their name effect'}${e.by && e.by !== e.username ? ` (by ${e.by})` : ''}${e.fxAllowed ? ' · can pick their own' : ''}` };
     if (t === 'flair') return { k: 'me', s: `${e.username} turned the rainbow name ${e.rainbow ? 'on' : 'off'}` };
     if (t === 'account-op') {
       if (e.op === 'signout') return { k: 'admin', s: `${e.by} signed ${e.target} out of every device` };
@@ -1575,6 +1616,26 @@
     body.append(stats);
   }
 
+  // The developer hands out name effects: apply one directly, or unlock the picker
+  // so the account chooses its own. Both live in one dialog — one decision.
+  async function openFxDialog(a) {
+    const r = await dialog({
+      title: `Name effect for ${a.username}`,
+      body: 'Applied right away, for everyone in every room. Or unlock the picker and let them choose their own.',
+      fields: [
+        { name: 'fx', label: 'Effect', type: 'select', value: a.fx || '', options: [{ label: 'None', value: '' }, ...state.effects.map(n => ({ label: fxLabel(n), value: n }))] },
+        { name: 'fxAllowed', label: 'Let them pick their own', type: 'select', value: a.fxAllowed ? 'yes' : 'no', options: [{ label: 'No', value: 'no' }, { label: 'Yes', value: 'yes' }] },
+      ],
+      confirm: 'Apply',
+    });
+    if (!r) return;
+    try {
+      await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'fx', fx: r.fx || null, fxAllowed: r.fxAllowed === 'yes' } });
+      toast(`${a.username}: ${r.fx ? fxLabel(r.fx) : 'no effect'}${r.fxAllowed === 'yes' ? ' · picker unlocked' : ''}`);
+      await renderAdmin();
+    } catch (e) { toast(e.message, 4200); }
+  }
+
   function renderPeopleTab(body, data) {
     // A generated password is shown once, here, and never logged anywhere.
     if (state.lastReset) {
@@ -1605,29 +1666,28 @@
       chip.dataset.role = a.role;
       nameWrap.append(chip);
       if (a.ban) nameWrap.append(el('span', 'ban-chip', a.ban.until ? `banned · ${fmtWhen(a.ban.until)}` : 'banned'));
-      if (a.rainbow) nameWrap.append(el('span', 'chip', 'rainbow'));
+      if (a.fx) nameWrap.append(el('span', 'chip', `fx · ${fxLabel(a.fx)}`));
       if (a.sessions) nameWrap.append(el('span', 'chip', `${a.sessions} session${a.sessions === 1 ? '' : 's'}`));
       row.append(nameWrap);
       row.append(el('span', 'log-meta', `${a.lastLogin ? `seen ${relTime(a.lastLogin)}` : 'never signed in'}${a.keyFp ? ` · key ${a.keyFp.slice(0, 8)}` : ' · no key yet'}`));
 
       const sel = el('select', 'input sm');
       for (const [v, label] of [['user', 'Member'], ['mod', 'Mod'], ['admin', 'Admin']]) { const o = el('option', null, label); o.value = v; sel.append(o); }
+      // The developer seat displays but is never assignable from here (box only).
+      if (a.role === 'developer') { const o = el('option', null, 'Developer'); o.value = 'developer'; o.disabled = true; sel.append(o); }
       sel.value = a.role;
-      sel.disabled = a.username === (me && me.username);
+      sel.disabled = a.username === (me && me.username) || a.role === 'developer';
       sel.onchange = async () => {
-        try { await api('/api/admin/role', { method: 'POST', body: { username: a.username, role: sel.value } }); toast(`${a.username} is now ${sel.value}`); await refreshAdmin(); }
+        try { await api('/api/admin/role', { method: 'POST', body: { username: a.username, role: sel.value } }); toast(`${a.username} is now ${roleChipText(sel.value)}`); await refreshAdmin(); }
         catch (e) { toast(e.message, 4200); await renderAdmin(); }
       };
       row.append(sel);
 
       const actions = el('div', 'row-actions');
-      if (a.role === 'admin') {
-        const rb = el('button', 'btn sm', a.rainbow ? 'Rainbow off' : 'Rainbow on');
-        rb.onclick = async () => {
-          try { await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'rainbow', rainbow: !a.rainbow } }); await renderAdmin(); toast(`${a.username}: rainbow ${a.rainbow ? 'off' : 'on'}`); }
-          catch (e) { toast(e.message, 4200); }
-        };
-        actions.append(rb);
+      if (rank(me && me.role) >= RANK.developer && a.username !== (me && me.username)) {
+        const fb = el('button', 'btn sm', 'Effect…');
+        fb.onclick = () => openFxDialog(a);
+        actions.append(fb);
       }
       if (a.username !== (me && me.username) && a.role !== 'admin') {
         const out = el('button', 'btn sm', 'Sign out');
@@ -2133,16 +2193,16 @@
     $('btnAccountSheet').onclick = () => { closeSheets(); renderMe(); openSheet($('accountSheet')); };
     $('btnAdminSheet').onclick = () => { closeSheets(); openAdminSheet(); };
     $('btnClaimSheet').onclick = () => { closeSheets(); openSheet($('claimSheet')); };
-    $('flairRainbow').onchange = async () => {
-      const on = $('flairRainbow').checked;
+    $('fxSelect').onchange = async () => {
+      const fx = $('fxSelect').value || null;
       try {
-        const res = await api('/api/me/flair', { method: 'POST', body: { rainbow: on } });
+        const res = await api('/api/me/fx', { method: 'POST', body: { fx } });
         state.me = res.me;
-        state.flair = res.flair || {};
-        renderMe();
+        state.fx = res.fx || {};
         rerenderNames(state.me.username);
-        toast(on ? 'Rainbow name on' : 'Rainbow name off');
-      } catch (e) { $('flairRainbow').checked = !on; toast(e.message, 4200); }
+        renderMe();
+        toast(fx ? `Name effect: ${fxLabel(fx)}` : 'Name effect cleared');
+      } catch (e) { renderMe(); toast(e.message, 4200); }
     };
     $('btnNewRoom').onclick = () => { closeSheets(); openSheet($('newRoomSheet')); };
     $('btnSignOut').onclick = signOut;

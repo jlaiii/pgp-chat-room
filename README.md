@@ -28,8 +28,10 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   may post) and *private* (hidden from the list, entry needs approval).
 - **Identity, three ways.** Sign in with username + password, create an account, or continue
   as a **guest** — a random handle with no account, limited to rooms that welcome guests.
-- **Roles.** `admin` › `mod` › `user` › `guest`. Admins run the site and can enter any room;
-  mods handle people and rooms; the owner of a room controls that room.
+- **Roles.** `developer` › `admin` › `mod` › `user` › `guest`. Admins run the site and can enter any
+  room; mods handle people and rooms; the owner of a room controls that room. The **developer** seat
+  sits above admin (handpicked name effects; the only role that outranks an admin) and is deliberately
+  set on the box, never over the wire.
 - **Pictures, video and files — off until an admin says otherwise.** Attachments are gated twice:
   a site-wide switch per kind (pictures / video / other files) and the room's own switch. Both are
   off out of the box, so a fresh relay takes text only. A file is sealed in the browser with a
@@ -60,10 +62,11 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   download the raw `.jsonl`. Mods see the same trail minus admin-only rows and IP addresses; the
   bootstrap claim code is never served to anyone. Message content is *not* in it — the relay cannot
   read a message, so there is nothing to log.
-- **The rainbow name.** An admin can switch on a cosmetic flair that gives their display name an
-  animated colour sweep: each letter carries its own hue and its own phase, so the fade travels
-  left to right. It is a rendering hint only — no key, no ciphertext, no permission — and it is
-  dropped the moment the account is demoted.
+- **Name effects.** Thirty of them — rainbow sweeps, RGB flashing, jumping letters, glitch, fire,
+  gold, typewriter and more. An effect is a rendering hint only (no key, no ciphertext, no
+  permission) and everyone in every room sees it on the name. The **developer** hands them out:
+  apply one to any account, or unlock an account's picker so it chooses its own. Nobody else can
+  change another account's effect, and a role change never touches it.
 - **Handles and keys.** Each browser makes its own Curve25519 keypair on first visit, and **an
   account makes its key when it is made**: registering generates the key (or claims this device's
   pre-account key) and saves it to the account as a sealed envelope — wrapped in the browser with a
@@ -87,7 +90,7 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | tombstone rows for deleted messages: who, when, who deleted it | the ciphertext of a deleted or edited message — both are shredded |
 | attachment blobs: how many bytes, in which room, uploaded when, by whom | what any file *is* — no name, no type, no content |
 | the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
-| the site notice text and which admins wear the rainbow badge | |
+| the site notice text and which accounts wear which name effect | |
 | message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
 | the optional **sealed** key envelope (opaque; no password ever reaches the server) | |
 
@@ -133,7 +136,7 @@ use, and an empty relay clears it at the first signup because the seat is alread
 |---|---|
 | **Overview** | live totals (online, keys, stored rows, attachments, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
 | **Activity** | the audit log: joins, leaves, keys, uploads, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` |
-| **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban, and the rainbow-name toggle — plus every live session with a one-click revoke and an accounts export |
+| **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban, and — for the developer — the name-effect picker (apply an effect, or unlock self-pick) — plus every live session with a one-click revoke and an accounts export |
 | **Rooms** | rename/about, **slow mode**, freeze, guest access, **attachments on/off**, take ownership, clear everyone out, clear stored ciphertext now, delete |
 | **Bans** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
 | **Settings** | allow new rooms, guests, signups; **pictures / video / other files**; **who may delete and edit a message**; the **message lifetime**; the site notice; announcements; and **lockdown** |

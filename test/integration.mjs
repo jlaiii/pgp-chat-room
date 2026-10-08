@@ -549,26 +549,54 @@ test('PGP Room relay — end to end', async t => {
     bossConn.ws.close();
   });
 
-  await t.test('the rainbow name is admin flair: own account, broadcast, and lost on demotion', async () => {
-    assert.equal((await user('POST', '/api/me/flair', JSON.stringify({ rainbow: true }))).status, 403, 'members cannot set flair');
-    const on = await admin('POST', '/api/me/flair', JSON.stringify({ rainbow: true }));
-    assert.equal(on.status, 200);
-    assert.equal(on.body.me.rainbow, true);
-    assert.equal(on.body.flair.jay, true, 'other clients are told which names to animate');
-    assert.equal((await admin('GET', '/api/me')).body.flair.jay, true, 'the flair map rides on /api/me');
+  await t.test('the developer seat: box-set, above admin, never mintable over the wire', async () => {
+    assert.equal((await admin('POST', '/api/admin/role', JSON.stringify({ username: 'casey', role: 'developer' }))).status, 403, 'no one mints a developer through the API');
 
-    const logged = await admin('GET', '/api/admin/events?type=flair');
-    assert.ok(logged.body.events.some(e => e.username === 'jay' && e.rainbow === true), 'flair changes are audited');
+    // Documented out-of-band path: edit accounts.json and restart.
+    srv.proc.kill('SIGTERM');
+    await sleep(600);
+    const accountsFile = path.join(dir, 'data', 'accounts.json');
+    const accounts = JSON.parse(await readFile(accountsFile, 'utf8'));
+    for (const a of accounts.accounts) if (a.username === 'jay') a.role = 'developer';
+    await writeFile(accountsFile, JSON.stringify(accounts));
+    srv = await startServer(cfgPath);
+    procs.push(srv.proc);
 
-    const overview = await admin('GET', '/api/admin/overview');
-    assert.equal(overview.body.accounts.find(a => a.username === 'jay').rainbow, true);
+    assert.equal((await admin('GET', '/api/me')).body.me.role, 'developer', 'the seat reads back');
+    assert.equal((await api('/healthz')).body.adminClaimable, false, 'a developer counts as the seat being taken');
 
-    assert.equal((await admin('POST', '/api/admin/role', JSON.stringify({ username: 'morgan', role: 'admin' }))).status, 200);
-    const painted = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'morgan', op: 'rainbow', rainbow: true }));
-    assert.equal(painted.body.rainbow, true, 'an admin can paint another admin');
-    await admin('POST', '/api/admin/role', JSON.stringify({ username: 'morgan', role: 'mod' }));
-    const after = await admin('GET', '/api/admin/overview');
-    assert.equal(after.body.flair.morgan, undefined, 'demotion takes the badge away');
+    // The developer outranks admin: promote a plain member to admin, then demote past it.
+    assert.equal((await admin('POST', '/api/admin/role', JSON.stringify({ username: 'casey', role: 'admin' }))).status, 200, 'the developer promotes an admin');
+    const cAdmin = makeClient();
+    await cAdmin('POST', '/api/auth/login', JSON.stringify({ username: 'casey', password: 'user-password-1' }));
+    assert.equal((await cAdmin('POST', '/api/admin/role', JSON.stringify({ username: 'jay', role: 'user' }))).status, 403, 'an admin cannot demote the developer');
+    assert.equal((await cAdmin('POST', '/api/admin/role', JSON.stringify({ username: 'morgan', role: 'developer' }))).status, 403, 'an admin cannot mint a developer');
+    assert.equal((await cAdmin('POST', '/api/admin/account', JSON.stringify({ username: 'morgan', op: 'fx', fx: 'glitch' }))).status, 403, 'only the developer hands out name effects');
+    assert.equal((await admin('POST', '/api/admin/role', JSON.stringify({ username: 'casey', role: 'user' }))).status, 200, 'the developer may demote an admin past it');
+  });
+
+  await t.test('name effects: applied or unlocked by the developer, self-picked when unlocked, map on /api/me', async () => {
+    assert.equal((await user('POST', '/api/me/fx', JSON.stringify({ fx: 'rainbow' }))).status, 403, 'a locked account cannot pick');
+    const applied = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'casey', op: 'fx', fx: 'glitch', fxAllowed: true }));
+    assert.equal(applied.status, 200);
+    assert.equal(applied.body.fx, 'glitch', 'the developer applied an effect');
+    assert.equal((await admin('GET', '/api/me')).body.fx.casey, 'glitch', 'the fx map rides on /api/me for every client');
+    const ov = await admin('GET', '/api/admin/overview');
+    assert.equal(ov.body.accounts.find(a => a.username === 'casey').fxAllowed, true);
+
+    // Unlocked: the account picks its own, and the change is audited.
+    const pick = await user('POST', '/api/me/fx', JSON.stringify({ fx: 'aurora' }));
+    assert.equal(pick.status, 200);
+    assert.equal(pick.body.me.fx, 'aurora');
+    assert.equal((await admin('GET', '/api/me')).body.fx.casey, 'aurora');
+    const logged = await admin('GET', '/api/admin/events?type=fx');
+    assert.ok(logged.body.events.some(e => e.username === 'casey' && e.fx === 'aurora'), 'effects are audited');
+
+    // Junk is refused; revoking the unlock closes the picker again.
+    assert.equal((await user('POST', '/api/me/fx', JSON.stringify({ fx: 'definitely-not-an-effect' }))).status, 400);
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'casey', op: 'fx', fx: null, fxAllowed: false }))).status, 200);
+    assert.equal((await admin('GET', '/api/me')).body.fx.casey, undefined, 'cleared');
+    assert.equal((await user('POST', '/api/me/fx', JSON.stringify({ fx: 'rainbow' }))).status, 403, 'the lock re-arms');
   });
 
   await t.test('an admin can sign an account out everywhere, delete it, and never orphan its rooms', async () => {
@@ -956,7 +984,7 @@ test('PGP Room relay — end to end', async t => {
 
     const accountsFile = path.join(dir, 'data', 'accounts.json');
     const accounts = JSON.parse(await readFile(accountsFile, 'utf8'));
-    for (const a of accounts.accounts) if (a.role === 'admin') a.role = 'user';
+    for (const a of accounts.accounts) if (a.role === 'admin' || a.role === 'developer') a.role = 'user';
     await writeFile(accountsFile, JSON.stringify(accounts));
 
     await writeConfig();
