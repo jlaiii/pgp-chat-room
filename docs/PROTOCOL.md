@@ -55,7 +55,7 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 | POST | `/api/mod/ban` | `{target, kind: account\|fp\|ip, room?: null, hours?: 1..720, reason?, mute?}` — `hours` omitted = permanent, `mute: true` = post-block that keeps their session. IP bans are admin-only |
 | POST | `/api/mod/unban` | `{id}` or `{kind, target, room}` |
 | GET | `/api/mod/bans` | active bans (mod+) |
-| GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts (rows, keys, attachments, bytes), a 7-day activity series, live sessions (admin) |
+| GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts (rows, keys, attachments, bytes), a 7-day activity series, live sessions (staff; mods get the same read with the session list empty) |
 | PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?, allowImages?, allowVideo?, allowFiles?, keySyncDefault?, retentionHours?: number\|null, keepForever?}` (admin). Changing the window sweeps the relay immediately |
 | POST | `/api/admin/role` | `{username, role}` — cannot change your own role (admin) |
 | GET | `/api/admin/sessions` | every live session with a 12-char hashed id; the raw token is never returned (admin) |
@@ -67,7 +67,7 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 | GET | `/api/admin/events/export` | the same trail as an `application/x-ndjson` download (admin) |
 | POST | `/api/admin/announce` | `{room: "<id>"\|"all", text}` (admin) — pushes a `sys` notice frame; never stored, never encrypted |
 | POST | `/api/admin/lockdown` | `{on}` (admin) — freezes every room; `on` also stops new rooms, signups and guests. Lifting clears the freezes but leaves the switches where they were |
-| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, fx, reset-password`. `fx` (`{fx, fxAllowed}`) is **developer-only**: apply a name effect and/or unlock self-pick. `reset-password` returns a generated password **once**, drops their sessions and clears the synced envelope (it was wrapped with the old one). Admin and developer seats are never a target and you cannot act on yourself |
+| POST | `/api/admin/account` | `{username, op}` (admin) with op ∈ `signout, delete, fx, reset-password, freeze`. `fx` (`{fx, fxAllowed}`) is **developer-only**: apply a name effect and/or unlock self-pick. `freeze` (`{frozen: bool}`) locks the account door — sessions dropped, sign-in refused until unfrozen; messages, keys and rooms untouched. `reset-password` returns a generated password **once**, drops their sessions and clears the synced envelope (it was wrapped with the old one). Admin and developer seats are never a target and you cannot act on yourself |
 | POST | `/api/admin/guests` | clears every guest session (admin) |
 | POST | `/api/admin/purge` | `{room}` (admin) — shreds that room's stored ciphertext now, disk and memory |
 

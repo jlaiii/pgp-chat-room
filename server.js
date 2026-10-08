@@ -484,6 +484,8 @@ async function handleRequest(req, res) {
       const b = await readJson(req);
       const rec = auth.verify(b.username, b.password);
       if (!rec) { event('login-failed', { username: String(b.username || '').slice(0, 24), ip }); return fail(res, 401, 'wrong username or password'); }
+      // A frozen account is locked out at the door: no session, no rooms.
+      if (rec.frozen) { event('login-failed', { username: rec.username, ip, reason: 'frozen' }); return send(res, 403, { error: 'this account is frozen — an admin can unfreeze it', frozen: true }); }
       const ban = auth.banFor({ username: rec.username, ip });
       if (ban) return send(res, 403, { error: banMessage(ban), banned: true, until: ban.until });
       rec.lastLogin = now();
@@ -910,10 +912,11 @@ async function handleRequest(req, res) {
       }
 
       if (method === 'GET' && p === '/api/admin/accounts/export') {
+        if (!isAdmin) return fail(res, 403, 'admin only');
         const rows = auth.list().map(a => JSON.stringify({
           username: a.username, role: a.role, createdAt: a.createdAt, createdAtISO: new Date(a.createdAt).toISOString(),
           lastLogin: a.lastLogin, lastLoginISO: a.lastLogin ? new Date(a.lastLogin).toISOString() : null,
-          keyFp: a.keyFp, syncKey: a.syncKey, fx: a.fx, fxAllowed: a.fxAllowed, sessions: a.sessions, banned: !!a.ban,
+          keyFp: a.keyFp, syncKey: a.syncKey, fx: a.fx, fxAllowed: a.fxAllowed, frozen: a.frozen, sessions: a.sessions, banned: !!a.ban,
         }));
         return send(res, 200, rows.join('\n') + (rows.length ? '\n' : ''), {
           'Content-Type': 'application/x-ndjson; charset=utf-8',
@@ -921,25 +924,21 @@ async function handleRequest(req, res) {
         });
       }
 
-      if (!isAdmin) return fail(res, 403, 'admin only');
-
-      if (method === 'GET' && p === '/api/admin/sessions') {
-        return send(res, 200, { sessions: auth.listSessions() });
-      }
-
+      // The overview powers every staff page. Mods get the same read with the
+      // session list (token hashes, IPs) stripped; only admins see live sessions.
       if (method === 'GET' && p === '/api/admin/overview') {
         const fileTotals = rooms.all().reduce((acc, r) => {
           const s = chat.fileStats(r.id);
           acc.count += s.count; acc.bytes += s.bytes;
           return acc;
         }, { count: 0, bytes: 0 });
-        return send(res, 200, {
+        const data = {
           accounts: auth.list(),
           rooms: rooms.all().map(r => rooms.view(r, actor, liveFor(r.id))),
           bans: auth.activeBans(),
           settings: settings.publicView(),
           sessions: auth.sessionCount(),
-          sessionList: auth.listSessions(),
+          sessionList: isAdmin ? auth.listSessions() : [],
           guestSessions: [...auth.sessions.values()].filter(s => s.kind === 'guest').length,
           online: [...online.entries()].map(([room, m]) => ({ room, online: [...m.values()].map(o => o.handle) })),
           stats: chat.stats(),
@@ -956,7 +955,14 @@ async function handleRequest(req, res) {
           fx: auth.fxMap(),
           retentionHours: chat.retentionHours,
           lockdown: !!settings.data.lockdown,
-        });
+        };
+        return send(res, 200, data);
+      }
+
+      if (!isAdmin) return fail(res, 403, 'admin only');
+
+      if (method === 'GET' && p === '/api/admin/sessions') {
+        return send(res, 200, { sessions: auth.listSessions() });
       }
 
       if (method === 'PATCH' || method === 'POST') {
@@ -1070,6 +1076,17 @@ async function handleRequest(req, res) {
             event('account-op', { op, target, by: actor.username, sessions, sockets });
             log('account-op', op, target, `sessions=${sessions}`);
             return send(res, 200, { ok: true, sessions, sockets });
+          }
+          if (op === 'freeze') {
+            // Lock the account itself: sessions dropped, sign-in refused — until
+            // unfrozen. Messages, keys and rooms are untouched (that is ban's job).
+            const frozen = !!b.frozen;
+            const r = auth.setFrozen(target, frozen);
+            if (r.error) return fail(res, 400, r.error);
+            const sockets = frozen ? kickSockets(c => c.__username === target, 'account frozen by an admin') : 0;
+            event('account-op', { op: 'freeze', target, frozen, by: actor.username, sessions: r.sessionsDropped, sockets });
+            log('account-op', frozen ? 'freeze' : 'unfreeze', target, `sessions=${r.sessionsDropped}`);
+            return send(res, 200, { ok: true, frozen, sessions: r.sessionsDropped, sockets });
           }
           if (op === 'reset-password') {
             // The new password is generated here, handed to the admin once, and never

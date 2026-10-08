@@ -125,21 +125,26 @@ seat is only *claimed* (one-shot code) or *granted* (admin panel), never assumed
 The claim code is the fallback for a relay that has accounts but no admin (a vacated seat). While no
 admin exists, boot generates a one-time 8-character code into `data/settings.json` and emits an
 `admin-claim` event; `scripts/telegram-notify.py` (or your own reader of `data/events.log`) delivers
-it to the operator, who enters it in the app under *Moderation & admin → Claim admin*. It burns on
+it to the operator, who enters it in the app under *menu → Claim admin*. It burns on
 use, and an empty relay clears it at the first signup because the seat is already taken.
 
-### The admin panel
+### The admin area
 
-*Moderation & admin* in the rail has six tabs:
+The hamburger menu has a **Manage** section — one page per job, each a full screen with a back
+button. Mods see Dashboard, Users, Activity and Bans & mutes; admins (and the developer) also see
+Rooms and Settings:
 
-| tab | what it is for |
+| page | what it is for |
 |---|---|
-| **Overview** | live totals (online, keys, stored rows, attachments, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
-| **Activity** | the audit log: joins, leaves, keys, uploads, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` |
-| **People** | every account with its role, sessions, key fingerprint and last sign-in; promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban, and — for the developer — the name-effect picker (apply an effect, or unlock self-pick) — plus every live session with a one-click revoke and an accounts export |
+| **Dashboard** | live totals (online, keys, stored rows, attachments, accounts, sessions, bans, rooms), a 7-day event sparkline, per-room counts, who is online right now |
+| **Activity** | the audit log: joins, leaves, keys, uploads, room changes, moderation, sign-ins — live over the WebSocket, filterable by kind, downloadable as `.jsonl` (admins) |
+| **Users** | every account as a card — role, sessions, key fingerprint, last sign-in — with search; **freeze/unfreeze**, promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban/unban, and — for the developer — the name-effect picker — plus every live session with a one-click revoke and an accounts export (admins) |
 | **Rooms** | rename/about, **slow mode**, freeze, guest access, **attachments on/off**, take ownership, clear everyone out, clear stored ciphertext now, delete |
-| **Bans** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
+| **Bans & mutes** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
 | **Settings** | allow new rooms, guests, signups; **pictures / video / other files**; **who may delete and edit a message**; the **message lifetime**; the site notice; announcements; and **lockdown** |
+
+**Freeze** locks the account door: sessions are dropped and sign-in is refused until unfrozen.
+Messages, keys and room memberships are untouched — that is what **ban** is for.
 
 **Attachments** are switched on twice, on purpose: the site switch says which *kinds* may be sent at
 all, and each room says whether it accepts them. Neither is on by default. A file is encrypted with a

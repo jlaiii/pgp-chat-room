@@ -621,6 +621,41 @@ test('PGP Room relay — end to end', async t => {
     assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'nobody-here', op: 'signout' }))).status, 404);
   });
 
+  await t.test('a freeze locks the account door: sessions out, sign-in refused, unfreeze restores', async () => {
+    const iceman = makeClient();
+    await iceman('POST', '/api/auth/register', JSON.stringify({ username: 'iceman', password: 'iceman-pass-1' }));
+    assert.equal((await iceman('GET', '/api/me')).status, 200, 'signed in before the freeze');
+
+    const frozen = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'iceman', op: 'freeze', frozen: true }));
+    assert.equal(frozen.status, 200);
+    assert.equal(frozen.body.frozen, true);
+    assert.ok(frozen.body.sessions >= 1, 'their sessions are dropped');
+    assert.equal((await iceman('GET', '/api/me')).status, 401, 'the live session is really gone');
+
+    const blocked = await iceman('POST', '/api/auth/login', JSON.stringify({ username: 'iceman', password: 'iceman-pass-1' }));
+    assert.equal(blocked.status, 403, 'sign-in is refused while frozen');
+    assert.equal(blocked.body.frozen, true, 'the refusal says why');
+
+    const row = (await admin('GET', '/api/admin/overview')).body.accounts.find(a => a.username === 'iceman');
+    assert.equal(row.frozen, true, 'the freeze shows on the account list');
+
+    // Mods cannot freeze; admin seats are never a target.
+    assert.equal((await mod('POST', '/api/admin/account', JSON.stringify({ username: 'iceman', op: 'freeze', frozen: true }))).status, 403, 'mods cannot freeze');
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'jay', op: 'freeze', frozen: true }))).status, 400, 'not yourself');
+
+    const unfrozen = await admin('POST', '/api/admin/account', JSON.stringify({ username: 'iceman', op: 'freeze', frozen: false }));
+    assert.equal(unfrozen.status, 200);
+    assert.equal((await iceman('POST', '/api/auth/login', JSON.stringify({ username: 'iceman', password: 'iceman-pass-1' }))).status, 200, 'unfreeze lets them back in');
+    await admin('POST', '/api/admin/account', JSON.stringify({ username: 'iceman', op: 'delete' }));
+  });
+
+  await t.test('mods read the staff overview; the live session list stays admin-only', async () => {
+    const ov = await mod('GET', '/api/admin/overview');
+    assert.equal(ov.status, 200, 'mods load the overview the staff pages render from');
+    assert.deepEqual(ov.body.sessionList, [], 'mods never see live session rows');
+    assert.ok(Array.isArray((await admin('GET', '/api/admin/overview')).body.sessionList), 'admins keep them');
+  });
+
   await t.test('an admin can burn a room’s stored ciphertext on the spot', async () => {
     const loungeRows = async () => ((await admin('GET', '/api/admin/overview')).body.perRoom.find(r => r.id === 'lounge') || {}).messages || 0;
     const before = await loungeRows();

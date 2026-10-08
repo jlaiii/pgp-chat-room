@@ -42,7 +42,7 @@
     claimable: false, ttlMs: 48 * 3600e3,
     lastAuthor: null, authMode: 'login', muted: false, saidBye: false,
     maxFileBytes: 0, lastReset: null,
-    fx: {}, effects: [], adminTab: 'overview', adminData: null, activity: [], activityHasMore: false, eventFilter: '',
+    fx: {}, effects: [], adminPage: null, adminData: null, userFilter: '', activity: [], activityHasMore: false, eventFilter: '',
   };
 
   const RANK = { guest: 0, user: 1, mod: 2, admin: 3, developer: 4 };
@@ -184,6 +184,10 @@
     $('railPanel').hidden = true;
     $('railScrim').hidden = true;
   }
+  function closeRail() {
+    $('railPanel').hidden = true;
+    $('railScrim').hidden = true;
+  }
 
   function dialog({ title, body, fields = [], confirm = 'Confirm', danger = false }) {
     return new Promise(resolve => {
@@ -242,6 +246,9 @@
 
   function showAuth(mode) {
     state.authMode = mode || 'login';
+    // A forced logout (frozen account, revoked session) must never leave a manage
+    // page floating over the sign-in screen.
+    if (state.adminPage) closePage();
     $('appScreen').hidden = true;
     $('authScreen').hidden = false;
     for (const b of document.querySelectorAll('.auth-tab')) b.classList.toggle('on', b.dataset.mode === state.authMode);
@@ -376,8 +383,8 @@
     rw.innerHTML = '';
     rw.append(nameEl(state.me.kind === 'guest' ? state.me.handle : state.me.username, null));
     rw.append(document.createTextNode(state.me.kind === 'guest' ? ' — guest' : ` — ${roleChipText(state.me.role)}`));
-    $('btnAdminSheet').hidden = rank(state.me.role) < RANK.mod;
     $('btnClaimSheet').hidden = !(state.claimable && state.me.kind === 'account');
+    applyMenuVisibility();
     $('syncRow').hidden = state.me.kind !== 'account';
     $('syncToggle').checked = !!state.me.syncKey;
     // A name effect is per-account and mirrors the account record: the picker is
@@ -961,7 +968,12 @@
         // Saying it twice, as a bare "removed" toast, reads like a second error.
         if (!state.saidBye) toast(ev.reason || 'disconnected', 4200);
         state.saidBye = false;
-        refreshRooms();
+        // A kick either killed the session itself (frozen, signed out, deleted) or
+        // just this seat in a room. Ask the relay which one before assuming.
+        api('/api/me').then(() => { refreshRooms(); }).catch(e => {
+          if (e.status === 401) showAuth('login');
+          else refreshRooms();
+        });
         return;
       }
       const wait = Math.min(15000, 1000 * 2 ** Math.min(state.wsRetry++, 4));
@@ -1262,6 +1274,7 @@
     state.me = null;
     state.room = null;
     closeSheets();
+    if (state.adminPage) closePage();
     showAuth('login');
   }
 
@@ -1342,11 +1355,17 @@
     } catch (e) { toast(e.message, 4200); renderRoomSheet(); }
   }
 
-  /* ---------------- admin sheet ---------------- */
+  /* ---------------- manage pages (hamburger) ---------------- */
 
-  const ADMIN_TABS = [
-    ['overview', 'Overview'], ['activity', 'Activity'], ['people', 'People'],
-    ['rooms', 'Rooms'], ['bans', 'Bans'], ['settings', 'Settings'],
+  // One page per job, reached from the menu. The minimum rank decides menu
+  // visibility; the server enforces the same ladder on every call anyway.
+  const ADMIN_PAGES = [
+    ['dashboard', 'Dashboard', 'mod'],
+    ['users', 'Users', 'mod'],
+    ['activity', 'Activity', 'mod'],
+    ['bans', 'Bans & mutes', 'mod'],
+    ['rooms', 'Rooms', 'admin'],
+    ['settings', 'Settings', 'admin'],
   ];
   const EVENT_FILTERS = [
     ['', 'Everything'],
@@ -1357,45 +1376,42 @@
     ['settings,role,admin-claimed,lockdown', 'Admin'],
   ];
 
-  async function openAdminSheet() {
-    openSheet($('adminSheet'));
-    buildAdminTabs();
-    await renderAdmin();
+  function applyMenuVisibility() {
+    const r = state.me ? rank(state.me.role) : -1;
+    for (const b of document.querySelectorAll('[data-page]')) b.hidden = r < (RANK[b.dataset.min] ?? RANK.mod);
+    const manage = $('railManage');
+    if (manage) manage.hidden = r < RANK.mod;
   }
 
-  function buildAdminTabs() {
-    const wrap = $('adminTabs');
-    if (wrap.dataset.built) { syncAdminTabs(); return; }
-    wrap.innerHTML = '';
-    for (const [id, label] of ADMIN_TABS) {
-      const b = el('button', 'tab', label);
-      b.type = 'button';
-      b.dataset.tab = id;
-      b.onclick = () => { state.adminTab = id; syncAdminTabs(); renderAdmin(); };
-      wrap.append(b);
-    }
-    wrap.dataset.built = '1';
-    syncAdminTabs();
+  function pageOpen(id) { return state.adminPage === id; }
+
+  function openPage(id) {
+    const page = ADMIN_PAGES.find(p => p[0] === id);
+    if (!page) return;
+    state.adminPage = id;
+    $('pageTitle').textContent = page[1];
+    $('pageView').hidden = false;
+    renderPage().then(() => { $('pageBody').scrollTop = 0; });
   }
 
-  function syncAdminTabs() {
-    const wrap = $('adminTabs');
-    if (!wrap) return;
-    for (const b of wrap.children) b.classList.toggle('on', b.dataset.tab === state.adminTab);
+  function closePage() {
+    state.adminPage = null;
+    $('pageView').hidden = true;
   }
 
-  async function renderAdmin() {
-    const body = $('adminBody');
+  async function renderPage() {
+    if (!state.adminPage) return;
+    const body = $('pageBody');
     body.innerHTML = '';
     let data;
     try { data = await api('/api/admin/overview'); } catch (e) { body.append(el('p', 'note', e.message)); return; }
     state.adminData = data;
     state.fx = data.fx || state.fx;
-    if (state.adminTab === 'activity') return renderActivityTab(body, data);
-    if (state.adminTab === 'people') return renderPeopleTab(body, data);
-    if (state.adminTab === 'rooms') return renderRoomsTab(body, data);
-    if (state.adminTab === 'bans') return renderBansTab(body, data);
-    if (state.adminTab === 'settings') return renderSettingsTab(body, data);
+    if (state.adminPage === 'activity') return renderActivityTab(body, data);
+    if (state.adminPage === 'users') return renderUsersTab(body, data);
+    if (state.adminPage === 'rooms') return renderRoomsTab(body, data);
+    if (state.adminPage === 'bans') return renderBansTab(body, data);
+    if (state.adminPage === 'settings') return renderSettingsTab(body, data);
     return renderOverviewTab(body, data);
   }
 
@@ -1452,7 +1468,7 @@
     if (t === 'register') return { k: 'acct', s: `${e.username} created an account${e.role === 'admin' ? ' — seated as admin' : ''}` };
     if (t === 'guest') return { k: 'acct', s: `${e.handle} entered as a guest` };
     if (t === 'login') return { k: 'auth', s: `${e.username} signed in` };
-    if (t === 'login-failed') return { k: 'bad', s: `failed sign-in for “${e.username}”` };
+    if (t === 'login-failed') return { k: 'bad', s: `failed sign-in for “${e.username}”${e.reason === 'frozen' ? ' (account frozen)' : ''}` };
     if (t === 'password-change') return { k: 'auth', s: `${e.username} changed their password` };
     if (t === 'sync-key') return { k: 'key', s: `${e.username} turned key sync ${e.enabled ? 'on' : 'off'}` };
     if (t === 'ban') return { k: 'ban', s: `${e.by} banned ${e.target}${e.room ? ` from ${e.room}` : ' site-wide'} · ${e.hours ? `${e.hours}h` : 'permanent'}${e.reason ? ` · ${e.reason}` : ''}` };
@@ -1466,6 +1482,7 @@
     if (t === 'account-op') {
       if (e.op === 'signout') return { k: 'admin', s: `${e.by} signed ${e.target} out of every device` };
       if (e.op === 'delete') return { k: 'admin', s: `${e.by} deleted the account ${e.target}` };
+      if (e.op === 'freeze') return { k: 'admin', s: `${e.by} ${e.frozen ? 'froze' : 'unfroze'} the account ${e.target}` };
       if (e.op === 'guest-purge') return { k: 'admin', s: `${e.by} cleared ${e.sessions} guest session${e.sessions === 1 ? '' : 's'}` };
       return { k: 'admin', s: `${e.by} ran ${e.op}` };
     }
@@ -1499,7 +1516,7 @@
     if (!e || !e.type || !matchesFilter(e.type)) return;
     state.activity.unshift(e);
     if (state.activity.length > 400) state.activity.length = 400;
-    if (!$('adminSheet').hidden && state.adminTab === 'activity' && $('eventList')) paintEvents();
+    if (pageOpen('activity') && $('eventList')) paintEvents();
   }
 
   function paintEvents() {
@@ -1523,7 +1540,7 @@
 
   async function refreshAdmin() {
     await refreshRooms();
-    await renderAdmin();
+    if (state.adminPage) await renderPage();
   }
 
   async function patchRoomAdmin(roomId, patch) {
@@ -1591,17 +1608,21 @@
     for (const [types, label] of EVENT_FILTERS) {
       const b = el('button', 'tab' + (state.eventFilter === types ? ' on' : ''), label);
       b.type = 'button';
-      b.onclick = async () => { state.eventFilter = types; await loadEvents(); await renderAdmin(); };
+      b.onclick = async () => { state.eventFilter = types; await loadEvents(); await renderPage(); };
       filters.append(b);
     }
     head.append(filters);
     head.append(el('p', 'hint', 'Live — rows appear as they happen. Only metadata is ever logged: the relay cannot read a message, so there is nothing to log.'));
     const tools = el('div', 'row-actions');
-    const dl = el('button', 'btn sm', 'Download .jsonl');
-    dl.onclick = () => { window.location.href = `/api/admin/events/export${state.eventFilter ? `?type=${encodeURIComponent(state.eventFilter)}` : ''}`; };
     const reload = el('button', 'btn sm', 'Reload');
-    reload.onclick = async () => { await loadEvents(); await renderAdmin(); };
-    tools.append(dl, reload);
+    reload.onclick = async () => { await loadEvents(); await renderPage(); };
+    tools.append(reload);
+    // The raw export is admin-only (server-enforced); mods read the live list.
+    if (rank(state.me && state.me.role) >= RANK.admin) {
+      const dl = el('button', 'btn sm', 'Download .jsonl');
+      dl.onclick = () => { window.location.href = `/api/admin/events/export${state.eventFilter ? `?type=${encodeURIComponent(state.eventFilter)}` : ''}`; };
+      tools.append(dl);
+    }
     head.append(tools);
     body.append(head);
 
@@ -1632,11 +1653,17 @@
     try {
       await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'fx', fx: r.fx || null, fxAllowed: r.fxAllowed === 'yes' } });
       toast(`${a.username}: ${r.fx ? fxLabel(r.fx) : 'no effect'}${r.fxAllowed === 'yes' ? ' · picker unlocked' : ''}`);
-      await renderAdmin();
+      await renderPage();
     } catch (e) { toast(e.message, 4200); }
   }
 
-  function renderPeopleTab(body, data) {
+  // The users dashboard: one card per account, straight actions. Rank decides
+  // which buttons render; the server enforces the same lines on every call.
+  function renderUsersTab(body, data) {
+    const staff = rank(state.me && state.me.role) >= RANK.admin;
+    const dev = rank(state.me && state.me.role) >= RANK.developer;
+    const me = state.me || {};
+
     // A generated password is shown once, here, and never logged anywhere.
     if (state.lastReset) {
       const box = el('section', 'block');
@@ -1648,7 +1675,7 @@
       box.append(field);
       box.append(el('p', 'hint', 'Hand it over, then ask them to change it. Their other sessions were dropped and their synced key envelope was cleared — it was wrapped with the old password.'));
       const done = el('button', 'btn sm', 'Done');
-      done.onclick = () => { state.lastReset = null; renderAdmin(); };
+      done.onclick = () => { state.lastReset = null; renderPage(); };
       const act = el('div', 'row-actions');
       act.append(done);
       box.append(act);
@@ -1657,46 +1684,91 @@
 
     const acct = el('section', 'block');
     acct.append(el('h3', null, `Accounts (${data.accounts.length})`));
-    const me = state.me;
+    const search = el('input', 'input');
+    search.type = 'search';
+    search.placeholder = 'Find a user…';
+    search.value = state.userFilter || '';
+    search.autocapitalize = 'none';
+    search.spellcheck = false;
+    acct.append(search);
+    const cards = el('div', 'acct-list');
+    acct.append(cards);
+
     for (const a of data.accounts) {
-      const row = el('div', 'row');
-      const nameWrap = el('span', 'row-name');
-      nameWrap.append(nameEl(a.username));
+      const card = el('div', 'acct-card');
+      card.dataset.user = a.username;
+
+      const top = el('div', 'acct-top');
+      top.append(nameEl(a.username));
       const chip = el('span', 'role-chip', roleChipText(a.role));
       chip.dataset.role = a.role;
-      nameWrap.append(chip);
-      if (a.ban) nameWrap.append(el('span', 'ban-chip', a.ban.until ? `banned · ${fmtWhen(a.ban.until)}` : 'banned'));
-      if (a.fx) nameWrap.append(el('span', 'chip', `fx · ${fxLabel(a.fx)}`));
-      if (a.sessions) nameWrap.append(el('span', 'chip', `${a.sessions} session${a.sessions === 1 ? '' : 's'}`));
-      row.append(nameWrap);
-      row.append(el('span', 'log-meta', `${a.lastLogin ? `seen ${relTime(a.lastLogin)}` : 'never signed in'}${a.keyFp ? ` · key ${a.keyFp.slice(0, 8)}` : ' · no key yet'}`));
+      top.append(chip);
+      if (a.frozen) top.append(el('span', 'chip frozen-chip', 'frozen'));
+      if (a.ban) top.append(el('span', 'ban-chip', a.ban.until ? `banned · ${fmtWhen(a.ban.until)}` : 'banned'));
+      if (a.fx) top.append(el('span', 'chip', `fx · ${fxLabel(a.fx)}`));
+      if (a.sessions) top.append(el('span', 'chip', `${a.sessions} session${a.sessions === 1 ? '' : 's'}`));
+      card.append(top);
+      card.append(el('p', 'acct-meta', `${a.lastLogin ? `seen ${relTime(a.lastLogin)}` : 'never signed in'}${a.keyFp ? ` · key ${a.keyFp.slice(0, 8)}` : ' · no key yet'}${a.syncKey ? ' · sync on' : ''}`));
 
-      const sel = el('select', 'input sm');
-      for (const [v, label] of [['user', 'Member'], ['mod', 'Mod'], ['admin', 'Admin']]) { const o = el('option', null, label); o.value = v; sel.append(o); }
-      // The developer seat displays but is never assignable from here (box only).
-      if (a.role === 'developer') { const o = el('option', null, 'Developer'); o.value = 'developer'; o.disabled = true; sel.append(o); }
-      sel.value = a.role;
-      sel.disabled = a.username === (me && me.username) || a.role === 'developer';
-      sel.onchange = async () => {
-        try { await api('/api/admin/role', { method: 'POST', body: { username: a.username, role: sel.value } }); toast(`${a.username} is now ${roleChipText(sel.value)}`); await refreshAdmin(); }
-        catch (e) { toast(e.message, 4200); await renderAdmin(); }
-      };
-      row.append(sel);
+      const actions = el('div', 'acct-acts');
 
-      const actions = el('div', 'row-actions');
-      if (rank(me && me.role) >= RANK.developer && a.username !== (me && me.username)) {
-        const fb = el('button', 'btn sm', 'Effect…');
-        fb.onclick = () => openFxDialog(a);
-        actions.append(fb);
-      }
-      if (a.username !== (me && me.username) && a.role !== 'admin') {
-        const out = el('button', 'btn sm', 'Sign out');
-        out.onclick = async () => {
-          try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'signout' } }); toast(`${a.username} signed out${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderAdmin(); }
-          catch (e) { toast(e.message, 4200); }
+      // Role — admin+, never your own seat; the developer seat is box-set only.
+      if (staff && a.username !== me.username && a.role !== 'developer') {
+        const sel = el('select', 'input sm');
+        for (const [v, label] of [['user', 'Member'], ['mod', 'Mod'], ['admin', 'Admin']]) { const o = el('option', null, label); o.value = v; sel.append(o); }
+        sel.value = a.role;
+        sel.title = `Role for ${a.username}`;
+        sel.onchange = async () => {
+          try { await api('/api/admin/role', { method: 'POST', body: { username: a.username, role: sel.value } }); toast(`${a.username} is now ${roleChipText(sel.value)}`); await refreshAdmin(); }
+          catch (e) { toast(e.message, 4200); await renderPage(); }
         };
+        actions.append(sel);
+      }
+
+      // Freeze — locks the account door (sessions out, sign-in refused) without
+      // touching messages, keys or rooms.
+      if (staff && a.username !== me.username && a.role !== 'admin' && a.role !== 'developer') {
+        const fr = el('button', 'btn sm', a.frozen ? 'Unfreeze' : 'Freeze');
+        fr.onclick = async () => {
+          if (a.frozen) {
+            try { await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'freeze', frozen: false } }); toast(`${a.username} unfrozen — they can sign in again`); await renderPage(); }
+            catch (e) { toast(e.message, 4200); }
+          } else {
+            const ok = await dialog({ title: `Freeze ${a.username}?`, body: 'They are signed out everywhere and cannot sign back in until you unfreeze. Messages, keys and rooms stay exactly as they are — this only locks the door.', confirm: 'Freeze' });
+            if (!ok) return;
+            try {
+              const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'freeze', frozen: true } });
+              toast(`${a.username} frozen${r.sessions ? ` · ${r.sessions} session${r.sessions === 1 ? '' : 's'} dropped` : ''}`);
+              await renderPage();
+            } catch (e) { toast(e.message, 4200); }
+          }
+        };
+        actions.append(fr);
+      }
+
+      // Moderation — mods and up, never against staff seats.
+      if (a.username !== me.username && a.role !== 'admin' && a.role !== 'developer') {
         const mute = el('button', 'btn sm', 'Mute');
         mute.onclick = () => muteUser(a.username, null);
+        actions.append(mute);
+        if (a.ban) {
+          const un = el('button', 'btn sm', 'Unban');
+          un.onclick = () => unban({ kind: 'account', target: a.username, room: null });
+          actions.append(un);
+        } else {
+          const bn = el('button', 'btn sm danger', 'Ban');
+          bn.onclick = () => banUser(a.username, null);
+          actions.append(bn);
+        }
+      }
+
+      // Account tools — admin+, never against staff seats.
+      if (staff && a.username !== me.username && a.role !== 'admin' && a.role !== 'developer') {
+        const out = el('button', 'btn sm', 'Sign out');
+        out.onclick = async () => {
+          try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'signout' } }); toast(`${a.username} signed out${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderPage(); }
+          catch (e) { toast(e.message, 4200); }
+        };
         const pw = el('button', 'btn sm', 'Reset password');
         pw.onclick = async () => {
           const ok = await dialog({ title: `Reset ${a.username}'s password?`, body: 'A new password is generated and shown to you once. Their sessions are dropped and their synced key envelope is cleared.', confirm: 'Reset', danger: true });
@@ -1704,7 +1776,7 @@
           try {
             const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'reset-password' } });
             state.lastReset = { username: a.username, password: r.password };
-            await renderAdmin();
+            await renderPage();
             toast(`New password ready for ${a.username}`);
           } catch (e) { toast(e.message, 4200); }
         };
@@ -1715,24 +1787,31 @@
           try { const r = await api('/api/admin/account', { method: 'POST', body: { username: a.username, op: 'delete' } }); toast(`${a.username} deleted${r.rooms.length ? ` · took over ${r.rooms.join(', ')}` : ''}`); await refreshAdmin(); }
           catch (e) { toast(e.message, 4200); }
         };
-        actions.append(out, mute, pw, del);
+        actions.append(out, pw, del);
       }
-      if (a.ban) {
-        const un = el('button', 'btn sm', 'Unban');
-        un.onclick = () => unban({ kind: 'account', target: a.username, room: null });
-        actions.append(un);
-      } else if (a.username !== (me && me.username)) {
-        const bn = el('button', 'btn sm danger', 'Ban');
-        bn.onclick = () => banUser(a.username, null);
-        actions.append(bn);
+
+      if (dev && a.username !== me.username) {
+        const fb = el('button', 'btn sm', 'Effect…');
+        fb.onclick = () => openFxDialog(a);
+        actions.append(fb);
       }
-      row.append(actions);
-      acct.append(row);
+
+      if (actions.children.length) card.append(actions);
+      cards.append(card);
     }
+
+    // The filter runs over the cards as you type — no refetch, so the field keeps focus.
+    const applyFilter = () => {
+      const q = (state.userFilter || '').toLowerCase();
+      for (const c of cards.children) c.hidden = !!q && !c.dataset.user.includes(q);
+    };
+    search.oninput = () => { state.userFilter = search.value.trim(); applyFilter(); };
+    applyFilter();
+
     body.append(acct);
 
-    // Live sessions: everything signed in right now, revocable one at a time. Tokens are
-    // never handed out — the panel works on a short hash.
+    // Live sessions: admins only — mods get an empty list from the server.
+    if (!staff) return;
     const sess = el('section', 'block');
     const list = data.sessionList || [];
     sess.append(el('h3', null, `Live sessions (${list.length})`));
@@ -1748,7 +1827,7 @@
       row.append(el('span', 'log-meta', `${s.kind}${s.ip ? ` · ${s.ip}` : ''} · seen ${relTime(s.lastSeen)}`));
       const kill = el('button', 'btn sm', 'Revoke');
       kill.onclick = async () => {
-        try { const r = await api('/api/admin/sessions', { method: 'POST', body: { id: s.id } }); toast(`Session revoked${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderAdmin(); }
+        try { const r = await api('/api/admin/sessions', { method: 'POST', body: { id: s.id } }); toast(`Session revoked${r.sockets ? ` · ${r.sockets} socket dropped` : ''}`); await renderPage(); }
         catch (e) { toast(e.message, 4200); }
       };
       row.append(kill);
@@ -1813,7 +1892,7 @@
       purge.onclick = async () => {
         const ok = await dialog({ title: `Clear ${r.name}?`, body: 'Every stored ciphertext row for this room is shredded immediately — disk and memory, no waiting for the retention window.', confirm: 'Clear now', danger: true });
         if (!ok) return;
-        try { const res = await api('/api/admin/purge', { method: 'POST', body: { room: r.id } }); toast(`Cleared ${res.purgedRows} row${res.purgedRows === 1 ? '' : 's'}`); await renderAdmin(); }
+        try { const res = await api('/api/admin/purge', { method: 'POST', body: { room: r.id } }); toast(`Cleared ${res.purgedRows} row${res.purgedRows === 1 ? '' : 's'}`); await renderPage(); }
         catch (e) { toast(e.message, 4200); }
       };
       const actions = el('div', 'row-actions');
@@ -1863,7 +1942,9 @@
     const kindLabel = el('label', 'field');
     kindLabel.append(el('span', 'field-label', 'Against'));
     const kind = el('select', 'input sm');
-    for (const [v, l] of [['account', 'an account'], ['fp', 'a device fingerprint'], ['ip', 'an IP address (admin only)']]) { const o = el('option', null, l); o.value = v; kind.append(o); }
+    for (const [v, l] of [['account', 'an account'], ['fp', 'a device fingerprint']]) { const o = el('option', null, l); o.value = v; kind.append(o); }
+    // Banning by address stays an admin tool.
+    if (rank(state.me && state.me.role) >= RANK.admin) { const o = el('option', null, 'an IP address'); o.value = 'ip'; kind.append(o); }
     kindLabel.append(kind);
     mk.append(kindLabel);
 
@@ -1924,16 +2005,19 @@
     body.append(mk);
 
     const list = el('section', 'block');
-    const clear = el('button', 'btn sm danger', 'Lift every ban');
-    clear.onclick = async () => {
-      const ok = await dialog({ title: 'Lift every ban?', body: 'Every ban and mute in the list goes away at once, site-wide and per room.', confirm: 'Lift all', danger: true });
-      if (!ok) return;
-      try { const res = await api('/api/admin/bans', { method: 'POST', body: {} }); toast(`Lifted ${res.removed} ban${res.removed === 1 ? '' : 's'}`); await refreshAdmin(); }
-      catch (e) { toast(e.message, 4200); }
-    };
-    const head = el('div', 'row-actions');
-    head.append(clear);
-    list.append(el('h3', null, `Active bans (${data.bans.length})`), head);
+    list.append(el('h3', null, `Active bans (${data.bans.length})`));
+    if (rank(state.me && state.me.role) >= RANK.admin) {
+      const clear = el('button', 'btn sm danger', 'Lift every ban');
+      clear.onclick = async () => {
+        const ok = await dialog({ title: 'Lift every ban?', body: 'Every ban and mute in the list goes away at once, site-wide and per room.', confirm: 'Lift all', danger: true });
+        if (!ok) return;
+        try { const res = await api('/api/admin/bans', { method: 'POST', body: {} }); toast(`Lifted ${res.removed} ban${res.removed === 1 ? '' : 's'}`); await refreshAdmin(); }
+        catch (e) { toast(e.message, 4200); }
+      };
+      const head = el('div', 'row-actions');
+      head.append(clear);
+      list.append(head);
+    }
     if (!data.bans.length) list.append(el('p', 'note', 'Nobody is banned or muted.'));
     for (const b of data.bans) {
       const row = el('div', 'row');
@@ -1995,7 +2079,7 @@
         state.ttlMs = ttlFrom(res.retentionHours);
         setRetentionNote();
         toast(res.retentionHours == null ? 'Messages are now kept until cleared' : `Messages now delete after ${fmtWindow(res.retentionHours * 3600000)}`);
-        await renderAdmin();
+        await renderPage();
       } catch (e) { toast(e.message, 4200); }
     };
     life.append(lifeSel);
@@ -2070,7 +2154,7 @@
     };
     const guests = el('button', 'btn sm', `Clear guest sessions (${data.guestSessions})`);
     guests.onclick = async () => {
-      try { const r = await api('/api/admin/guests', { method: 'POST', body: {} }); toast(`Cleared ${r.sessions} guest session${r.sessions === 1 ? '' : 's'}`); await renderAdmin(); }
+      try { const r = await api('/api/admin/guests', { method: 'POST', body: {} }); toast(`Cleared ${r.sessions} guest session${r.sessions === 1 ? '' : 's'}`); await renderPage(); }
       catch (e) { toast(e.message, 4200); }
     };
     const actions = el('div', 'row-actions');
@@ -2098,7 +2182,7 @@
       const res = await api('/api/mod/ban', { method: 'POST', body: { target: username, kind: 'account', room: roomId || null, hours: r.hours === '' ? null : Number(r.hours), reason: r.reason } });
       toast(`${username} banned${res.kicked ? ` · ${res.kicked} connection dropped` : ''}`);
       await refreshRooms();
-      if (!$('adminSheet').hidden) renderAdmin();
+      if (state.adminPage) renderPage();
       if (!$('roomSheet').hidden) renderRoomSheet();
     } catch (e) { toast(e.message, 4200); }
   }
@@ -2107,7 +2191,7 @@
     try {
       const res = await api('/api/mod/unban', { method: 'POST', body: payload });
       toast(res.removed ? 'Ban lifted' : 'Nothing to lift');
-      if (!$('adminSheet').hidden) renderAdmin();
+      if (state.adminPage) renderPage();
     } catch (e) { toast(e.message, 4200); }
   }
 
@@ -2151,7 +2235,7 @@
         await syncKeyUp(password);   // an account with no envelope gets this device's key saved to it
         await afterAuth();
       } catch (e) {
-        $('authNote').textContent = e.body && e.body.banned ? e.message : 'Wrong username or password.';
+        $('authNote').textContent = e.body && (e.body.banned || e.body.frozen) ? e.message : 'Wrong username or password.';
         if (!$('appScreen').hidden) toast(`Sign-in failed: ${e.message}`, 5000);
       }
     };
@@ -2191,7 +2275,8 @@
     $('meBtn').onclick = openKeySheet;
     $('btnKeySheet').onclick = () => { closeSheets(); openKeySheet(); };
     $('btnAccountSheet').onclick = () => { closeSheets(); renderMe(); openSheet($('accountSheet')); };
-    $('btnAdminSheet').onclick = () => { closeSheets(); openAdminSheet(); };
+    for (const b of document.querySelectorAll('[data-page]')) b.onclick = () => { closeRail(); openPage(b.dataset.page); };
+    $('pageBack').onclick = closePage;
     $('btnClaimSheet').onclick = () => { closeSheets(); openSheet($('claimSheet')); };
     $('fxSelect').onchange = async () => {
       const fx = $('fxSelect').value || null;
@@ -2286,6 +2371,8 @@
         await api('/api/auth/claim', { method: 'POST', body: { code } });
         $('claimCode').value = '';
         closeSheets();
+        await loadMe();
+        renderMe();
         await refreshRooms();
         toast('You are the admin');
       } catch (e) { toast(e.message, 4200); }
@@ -2297,7 +2384,11 @@
       if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 700) { e.preventDefault(); sendCurrent(); }
     });
     $('sendBtn').onclick = sendCurrent;
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheets(); });
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      if (!$('scrim').hidden) closeSheets();
+      else if (state.adminPage) closePage();
+    });
     // Tapping anywhere but the bubble puts a revealed action row away again.
     document.addEventListener('touchstart', e => {
       for (const n of document.querySelectorAll('#msgs .msg.acts-on')) {

@@ -7,7 +7,7 @@
 <meta name="description" content="End-to-end encrypted chat rooms. The server stores ciphertext it cannot read.">
 <title>PGP Room</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236c8cff' d='M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 5a3 3 0 1 1 6 0v3H9V7Zm4 8.7V18a1 1 0 1 1-2 0v-2.3a2 2 0 1 1 2 0Z'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/style.css?v=15">
+<link rel="stylesheet" href="/style.css?v=18">
 <meta name="theme-color" content="#0b0d12">
 </head>
 <body>
@@ -132,11 +132,30 @@
   <nav class="rail-foot">
     <button class="rail-link" id="btnKeySheet" type="button">Your key</button>
     <button class="rail-link" id="btnAccountSheet" type="button">Account</button>
-    <button class="rail-link" id="btnAdminSheet" type="button" hidden>Moderation &amp; admin</button>
+    <div id="railManage" hidden>
+      <p class="rail-group">Manage</p>
+      <button class="rail-link" data-page="dashboard" data-min="mod" type="button" hidden>Dashboard</button>
+      <button class="rail-link" data-page="users" data-min="mod" type="button" hidden>Users</button>
+      <button class="rail-link" data-page="activity" data-min="mod" type="button" hidden>Activity</button>
+      <button class="rail-link" data-page="bans" data-min="mod" type="button" hidden>Bans &amp; mutes</button>
+      <button class="rail-link" data-page="rooms" data-min="admin" type="button" hidden>Rooms</button>
+      <button class="rail-link" data-page="settings" data-min="admin" type="button" hidden>Settings</button>
+    </div>
     <button class="rail-link" id="btnClaimSheet" type="button" hidden>Claim admin</button>
     <button class="rail-link danger" id="btnSignOut" type="button">Sign out</button>
   </nav>
 </aside>
+
+<!-- ---------- manage pages (hamburger navigation) ---------- -->
+<div class="page" id="pageView" hidden>
+  <header class="page-hdr">
+    <button class="icon-btn" id="pageBack" type="button" aria-label="Back to chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20v-2Z"/></svg>
+    </button>
+    <h2 id="pageTitle">Manage</h2>
+  </header>
+  <div class="page-body" id="pageBody"></div>
+</div>
 
 <!-- ---------- sheets ---------- -->
 <div class="scrim" id="scrim" hidden></div>
@@ -227,13 +246,6 @@
   </div>
 </section>
 
-<section class="sheet" id="adminSheet" hidden aria-label="Moderation and admin">
-  <div class="grip" aria-hidden="true"></div>
-  <div class="sheet-head"><h2>Moderation &amp; admin</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
-  <div class="tabs" id="adminTabs" role="tablist"></div>
-  <div id="adminBody"></div>
-</section>
-
 <section class="sheet" id="claimSheet" hidden aria-label="Claim admin">
   <div class="grip" aria-hidden="true"></div>
   <div class="sheet-head"><h2>Claim admin</h2><button class="x sheet-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg></button></div>
@@ -270,6 +282,6 @@
 
 <script src="/vendor/openpgp.min.js?v=1"></script>
 <script src="/identity.js?v=3"></script>
-<script src="/app.js?v=17"></script>
+<script src="/app.js?v=20"></script>
 </body>
 </html>

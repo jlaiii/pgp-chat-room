@@ -553,6 +553,41 @@ textarea.input{min-height:70px;padding:11px 13px;line-height:1.45;resize:vertica
 
 .msg .who.fx{letter-spacing:.01em}
 
+/* ---------------- manage pages (hamburger navigation) ---------------- */
+
+.page{position:fixed;inset:0;z-index:38;background:var(--bg);display:flex;flex-direction:column}
+.page-hdr{
+  display:flex;align-items:center;gap:8px;padding:0 10px;min-height:52px;border-bottom:1px solid var(--line);
+  background:rgba(18,22,30,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  padding-top:env(safe-area-inset-top);
+}
+.page-hdr h2{font-size:15px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.page-body{flex:1;overflow-y:auto;padding:14px 14px calc(26px + env(safe-area-inset-bottom));display:flex;flex-direction:column}
+.page-body > *{width:100%}
+.page-body::-webkit-scrollbar{width:10px;height:10px}
+.page-body::-webkit-scrollbar-thumb{background:var(--line2);border-radius:99px;border:3px solid transparent;background-clip:content-box}
+.page-body::-webkit-scrollbar-track{background:transparent}
+
+.rail-group{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut2);padding:12px 12px 4px;font-weight:600}
+.rail-link{width:100%}
+
+/* user cards on the Users page: identity on top, controls beneath, room to breathe */
+.acct-card{border:1px solid var(--line);border-radius:14px;padding:12px 12px 11px;margin-top:10px;background:var(--panel)}
+.acct-card:first-child{margin-top:0}
+.acct-top{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.acct-meta{font-size:11.5px;color:var(--mut2);margin-top:5px}
+.acct-acts{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:11px}
+.acct-acts .btn.sm{min-height:38px;padding:0 14px}
+.acct-acts .input.sm{min-height:38px}
+.chip.frozen-chip{color:#9fc6ff;background:#17233c}
+.acct-list{margin-top:12px}
+
+@media (min-width:700px){
+  /* The scroll container stays full width (so the scrollbar hugs the window
+     edge); the content inside it is what gets the readable max-width. */
+  .page-body > *{max-width:760px;margin-left:auto;margin-right:auto}
+}
+
 /* ---------------- wider screens ---------------- */
 
 @media (max-width:520px){
