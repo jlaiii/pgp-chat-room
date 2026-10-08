@@ -6,7 +6,8 @@
 npm test          # node --test test/  — spawns a real relay on a temp data dir
 ```
 
-Covers: the shell + CSP, that every API needs a session, the admin bootstrap (the first account on an
+Covers: the shell + CSP (and that the shell's `app-version` stamp, `/api/version` and the socket
+welcome all agree — what lets open pages update themselves after a deploy), that every API needs a session, the admin bootstrap (the first account on an
 empty relay is seated as `admin`, later accounts are plain `user`s, and the fallback claim code still
 seats one on a vacated seat while refusing a wrong code), roles and promotions, guest sessions,
 malformed/private-key rejection, the pre-join message staying unreadable to a later key, a post-join

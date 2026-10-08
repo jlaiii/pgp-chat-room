@@ -72,6 +72,10 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   shown once and never logged), sign an account out everywhere or revoke one session, delete an account
   (its rooms pass to the admin, its DMs and social traces are scrubbed, never orphaned), and watch
   totals, a 7-day sparkline and who is online right now.
+- **It updates itself.** The relay stamps every page with a version built from its own files, and
+  open tabs keep an eye on it — the socket tells them on reconnect, they check when the tab comes
+  back, and once a minute besides. When the version moved (a deploy), the page reloads itself: no
+  hard-refresh instructions, and a half-typed message is kept and put back into its composer.
 - **The activity log lives on the site, not in your phone.** Every join, leave, key registration,
   ban, role change and sign-in attempt streams into the admin panel live. Filter it by kind, or
   download the raw `.jsonl`. Mods see the same trail minus admin-only rows and IP addresses; the

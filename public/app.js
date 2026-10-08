@@ -293,9 +293,11 @@
     const wanted = Identity.pref('room') || 'lounge';
     const target = state.rooms.find(r => r.id === wanted) || state.rooms.find(r => r.id === 'lounge') || state.rooms[0];
     if (target) await enterRoom(target.id);
+    announceUpdated(restoreDrafts());
   }
 
   async function boot() {
+    setupVersionWatch();
     $('appScreen').hidden = true;
     let meResp = null;
     try {
@@ -332,6 +334,7 @@
     const wanted = Identity.pref('room') || 'lounge';
     const target = state.rooms.find(r => r.id === wanted) || state.rooms.find(r => r.id === 'lounge') || state.rooms[0];
     if (target) await enterRoom(target.id);
+    announceUpdated(restoreDrafts());
   }
 
   // Relay policy that every client should follow live: the notice board and whether
@@ -353,6 +356,90 @@
     // Voice may have been switched on/off: both composers listen to the same flag.
     updateComposerState();
     if (state.dm.with) updateDmComposer();
+  }
+
+  /* ---------------- staying current ---------------- */
+
+  // The relay stamps every page load with a version built from its asset files
+  // (a meta tag in the shell, /api/version, and the socket welcome). When that
+  // version moves — a deploy — open pages reload themselves: on socket reconnect,
+  // when the tab comes back, and once a minute. Nothing ever waits for somebody to
+  // remember a hard refresh, and a half-typed message survives the blink.
+  const DRAFT_KEY = 'pgpchat.draft.v1';
+  let updating = false;
+
+  function saveDrafts() {
+    try {
+      const draft = {};
+      const who = state.me && (state.me.username || state.me.handle);
+      const ri = $('input');
+      if (who && state.room && ri && ri.value.trim()) draft.room = { who, id: state.room.id, text: ri.value };
+      const di = $('dmInput');
+      if (who && state.dm.with && di && di.value.trim()) draft.dm = { who, with: state.dm.with, text: di.value };
+      if (draft.room || draft.dm) localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    } catch { /* storage trouble must not block the update */ }
+  }
+
+  function softUpdate() {
+    if (updating) return;
+    // Never yank the page mid-thought: an active recording or a queued attachment
+    // waits for a better moment.
+    if (voice.rec || pendingFile || state.dm.pending) { setTimeout(softUpdate, 15000); return; }
+    updating = true;
+    saveDrafts();
+    try { sessionStorage.setItem('pgpchat.updated', '1'); } catch { /* fine */ }
+    if (document.hidden) { location.reload(); return; }
+    banner('A new version is being loaded…', 'info');
+    setTimeout(() => location.reload(), 1600);
+  }
+
+  async function checkVersion() {
+    if (updating) return;
+    let v = null;
+    try { v = (await (await fetch('/api/version', { cache: 'no-store' })).json()).version; } catch { return; }
+    if (!v) return;
+    if (!state.appVersion) { state.appVersion = v; return; }   // an older shell: adopt the relay's word as the baseline
+    if (v !== state.appVersion) softUpdate();
+  }
+
+  function setupVersionWatch() {
+    const meta = document.querySelector('meta[name="app-version"]');
+    state.appVersion = (meta && meta.content) || null;
+    checkVersion();
+    setInterval(checkVersion, 60000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
+  }
+
+  // A draft comes back exactly once — into the composer it was typed in. Anything
+  // for another room or thread waits in storage until that room is the one opened.
+  function restoreDrafts() {
+    let draft = null;
+    try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); } catch { /* ignore */ }
+    if (!draft || !state.me) return false;
+    const who = state.me.username || state.me.handle;
+    const keep = {};
+    let restored = false;
+    if (draft.room && draft.room.who === who && state.room && draft.room.id === state.room.id) {
+      const i = $('input');
+      i.value = draft.room.text;
+      autoGrow(); updateComposerState();
+      restored = true;
+    } else if (draft.room) keep.room = draft.room;
+    if (draft.dm && draft.dm.who === who) state.dmDraft = draft.dm;   // applied when that thread opens
+    else if (draft.dm) keep.dm = draft.dm;
+    try {
+      if (keep.room || keep.dm) localStorage.setItem(DRAFT_KEY, JSON.stringify(keep));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
+    return restored;
+  }
+
+  function announceUpdated(keptDraft) {
+    let flag = null;
+    try { flag = sessionStorage.getItem('pgpchat.updated'); } catch { /* ignore */ }
+    if (!flag) return;
+    try { sessionStorage.removeItem('pgpchat.updated'); } catch { /* ignore */ }
+    toast(keptDraft ? 'Updated to the newest version — your draft was kept' : 'Updated to the newest version', 3400);
   }
 
   async function promptUnlock() {
@@ -1065,6 +1152,9 @@
   async function handleFrame(m) {
     if (m.t === 'welcome') {
       setConn('on');
+      // The relay tells us which asset generation it is serving: a mismatch means
+      // a deploy landed while this page was open — take the update.
+      if (m.version && state.appVersion && m.version !== state.appVersion) softUpdate();
       state.frozen = !!m.frozen;
       state.muted = !!m.muted;
       state.canPost = !!m.canPost;
@@ -1507,6 +1597,12 @@
       }
       scrollDmBottom(true);
       markDmRead();
+      // A draft saved by an auto-update reload lands in the thread it was typed in.
+      if (state.dmDraft && state.dmDraft.with === username) {
+        $('dmInput').value = state.dmDraft.text;
+        state.dmDraft = null;
+        dmAutoGrow(); updateDmComposer();
+      }
     } catch (e) {
       toast(e.message, 4600);
       closeDm();
@@ -3020,3 +3116,4 @@
   wire();
   boot().catch(e => banner(`Startup problem: ${e.message}`, 'err'));
 })();
+

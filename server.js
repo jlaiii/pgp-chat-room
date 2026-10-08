@@ -441,6 +441,23 @@ const STATIC = {
   '/vendor/openpgp.min.js': ['vendor/openpgp.min.js', 'text/javascript; charset=utf-8', 'public, max-age=31536000, immutable'],
 };
 
+// A version tag built from the actual asset files (size + mtime each). It changes
+// the moment a deploy touches one of them — no restart, no build step — and it is
+// handed to every page (a meta tag in the HTML, /api/version, and the socket
+// welcome), so open pages notice a deploy and reload themselves instead of
+// waiting for somebody to remember a hard refresh.
+function assetVersion() {
+  const parts = [];
+  const seen = new Set();
+  for (const [, [rel]] of Object.entries(STATIC)) {
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    try { const st = fs.statSync(path.join(PUB, rel)); parts.push(`${rel}:${st.size}:${Math.round(st.mtimeMs)}`); }
+    catch { parts.push(`${rel}:gone`); }
+  }
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
+}
+
 async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname;
@@ -453,12 +470,24 @@ async function handleRequest(req, res) {
     const file = path.join(PUB, rel);
     if (!file.startsWith(PUB)) return fail(res, 403, 'forbidden');
     if (!fs.existsSync(file)) return fail(res, 404, 'not found');
+    // The shell carries its own version stamp: every page load knows exactly which
+    // asset generation it is, without asking anybody.
+    if (rel === 'index.html') {
+      const html = fs.readFileSync(file, 'utf8').replace('<head>', `<head>\n<meta name="app-version" content="${assetVersion()}">`);
+      res.writeHead(200, { ...secHeaders, 'Content-Type': ctype, 'Cache-Control': cc, 'Content-Length': Buffer.byteLength(html) });
+      return res.end(method === 'HEAD' ? undefined : html);
+    }
     if (method === 'HEAD') { res.writeHead(200, { ...secHeaders, 'Content-Type': ctype, 'Cache-Control': cc }); return res.end(); }
     res.writeHead(200, { ...secHeaders, 'Content-Type': ctype, 'Cache-Control': cc, 'Content-Length': fs.statSync(file).size });
     return res.end(fs.readFileSync(file));
   }
   if (method === 'GET' && p === '/robots.txt') {
     return send(res, 200, 'User-agent: *\nDisallow: /\n', { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=86400' });
+  }
+  // What version are the assets, right now? Open clients poll this to know when a
+  // deploy happened to them.
+  if (method === 'GET' && p === '/api/version') {
+    return send(res, 200, { version: assetVersion(), serverTime: now() }, { 'Cache-Control': 'no-store' });
   }
   if (method === 'GET' && p === '/healthz') {
     const s = chat.stats();
@@ -468,7 +497,7 @@ async function handleRequest(req, res) {
       return acc;
     }, { count: 0, bytes: 0 });
     return send(res, 200, {
-      ok: true, rooms: rooms.all().length, messages: s.messages, keys: s.keys, online: wss ? wss.clients.size : 0,
+      ok: true, version: assetVersion(), rooms: rooms.all().length, messages: s.messages, keys: s.keys, online: wss ? wss.clients.size : 0,
       accounts: auth.count(), sessions: auth.sessionCount(), bans: auth.activeBans().length,
       files: files.count, fileBytes: files.bytes, dms: dm.stats(),
       uptime: Math.round(process.uptime()), retentionHours: chat.retentionHours,
@@ -1545,6 +1574,7 @@ wss.on('connection', (ws, req) => {
       const muted = !!banFor(actor, roomId, { forPost: true, ip });
       ws.send(JSON.stringify({
         t: 'welcome',
+        version: assetVersion(),
         you: { fp, handle, kind: actor.kind, username: actor.username, role: actor.role, joinedAt: (chat.pool(roomId).get(fp) || {}).joinedAt || null },
         room: view, online: roomOnlineList(roomId), poolSize: chat.poolSize(roomId),
         serverTime: now(), retentionHours: chat.retentionHours, frozen: room.frozen,
@@ -1645,7 +1675,7 @@ wss.on('connection', (ws, req) => {
       joinPresence(ws, roomId, { ...actor, fp: ws.__fp, handle: ws.__handle });
       const view = rooms.view(room, actor, liveFor(roomId));
       ws.send(JSON.stringify({
-        t: 'welcome', you: { fp: ws.__fp, handle: ws.__handle, kind: actor.kind, username: actor.username, role: actor.role },
+        t: 'welcome', version: assetVersion(), you: { fp: ws.__fp, handle: ws.__handle, kind: actor.kind, username: actor.username, role: actor.role },
         room: view, online: roomOnlineList(roomId), poolSize: chat.poolSize(roomId), serverTime: now(),
         retentionHours: chat.retentionHours, frozen: room.frozen, canPost: rooms.can(actor, 'post', room),
       }));

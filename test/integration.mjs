@@ -166,6 +166,14 @@ test('PGP Room relay — end to end', async t => {
       const r = await fetch(BASE + asset);
       assert.equal(r.status, 200, `${asset} must be served`);
     }
+    // The shell carries an asset version, and the relay exposes the same one —
+    // that pair is what lets open pages notice a deploy and update themselves.
+    const ver = await api('/api/version');
+    assert.equal(ver.status, 200);
+    assert.match(ver.body.version, /^[0-9a-f]{12}$/);
+    assert.equal((await api('/api/version')).body.version, ver.body.version, 'stable while the assets are');
+    const html = await (await fetch(`${BASE}/`)).text();
+    assert.ok(html.includes(`name="app-version" content="${ver.body.version}"`), 'the shell stamp matches /api/version');
   });
 
   await t.test('login is required before anything else', async () => {
@@ -219,6 +227,12 @@ test('PGP Room relay — end to end', async t => {
     assert.ok(pool.body.keys.some(k => k.fp === G.fp));
     // a guest may not create rooms or open new ones
     assert.equal((await guest('POST', '/api/rooms', JSON.stringify({ name: 'guest room' }))).status, 403);
+    // the socket welcome carries the relay's asset version too
+    const gs = await connect(guest.cookie());
+    gs.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: G.fp, handle: 'quiet-heron-11' }));
+    const w = await waitFor(gs.frames, f => f.t === 'welcome');
+    assert.match(w.version, /^[0-9a-f]{12}$/, 'the welcome frame carries the relay version');
+    gs.ws.close();
   });
 
   await t.test('rejects malformed input and private armor', async () => {

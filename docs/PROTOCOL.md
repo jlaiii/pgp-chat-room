@@ -19,6 +19,7 @@ does not match `Host` is rejected with 403 before it is routed.
 | POST | `/api/auth/claim` | `{code}` | fallback bootstrap: promotes the caller to `admin` while no admin exists (a vacant seat); 409 once one does |
 | POST | `/api/guest` | `{handle?, fp?}` | 201 + guest session; 403 when guest access is off |
 | GET | `/api/me` | — | `{me, settings, claimable, retentionHours, fx, effects, rooms[]}` (`effects` is the name-effect list; `fx` is the account→effect map) |
+| GET | `/api/version` | — | `{version, serverTime}` — a 12-hex stamp built from the asset files (size+mtime). Open pages poll it (and read the same stamp from the shell's `app-version` meta tag and the socket welcome) to reload themselves after a deploy |
 | POST | `/api/me/fx` | `{fx}` | the caller's own name effect. Staff, or any account the developer unlocked (`fxAllowed`); `null` clears |
 | GET/PUT | `/api/sync-key` | `{blob, fp?, keyId?, publicKey?}` | accounts only; the blob is an opaque sealed envelope, saved to the account and never detachable. When the public half rides along it binds the account's DM key in the same step. `DELETE` is refused — the only way past a synced key is a rotation |
 | POST | `/api/account/rotate-key` | `{password, blob, fp, keyId, publicKey}` | replaces the account's key in one write: the password re-verifies, the new envelope is stored as the old one drops, and the old fingerprint is pulled from every room pool before the response |
