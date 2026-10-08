@@ -22,8 +22,16 @@ self-pick only when unlocked), the developer seat is box-set and above admin, an
 signed out everywhere and deleted with its rooms handed over, and a room's ciphertext can be burned on
 the spot. Attachments have their own coverage: they stay off until the site switch for that kind and
 the room switch are both on, the stored bytes round-trip exactly, strangers get nothing, the size cap
-refuses an oversize body unread, a mute blocks posting without ending the session, a password reset
+refuses an oversize body unread, voice notes ride their own site switch and the room gate (and upload
+to DMs), a mute blocks posting without ending the session, a password reset
 and a single-session revoke both stick, and the message lifetime is policy the panel can change.
+People have their own: guests are refused the directory/friends/DM endpoints outright, a friend
+request lands as incoming for the target and accepting lands the friendship on both sides, a DM row
+crosses the wire as ciphertext, delivers live to the recipient's socket and echoes the sender's
+`tmpId` at frame level, the recipient decrypts and verifies it while the relay only ever saw the
+armored blob, unread counts follow the read marks, block silences DMs and requests both ways, a
+blocked user cannot request, unblock + a fresh request (or asking back) restores the friendship, and
+deleting an account scrubs its threads from disk and from everyone's social lists.
 Messages have their own: a tombstone with no ciphertext replaces a deleted row on disk, a stranger
 cannot delete or edit your message, staff can delete but never edit one, editing shreds the old
 ciphertext, and both switches gate the author while staff keep moderation.

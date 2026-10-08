@@ -66,13 +66,17 @@ function connect(cookie) {
   });
 }
 
-function waitFor(frames, pred, ms = 5000) {
+function waitFor(frames, pred, ms = 5000, label = '') {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     const iv = setInterval(() => {
       const hit = frames.find(pred);
       if (hit) { clearInterval(iv); resolve(hit); }
-      else if (Date.now() - t0 > ms) { clearInterval(iv); reject(new Error('timed out waiting for frame')); }
+      else if (Date.now() - t0 > ms) {
+        clearInterval(iv);
+        const tail = frames.slice(-8).map(f => `${f.t}${f.msg ? `("${String(f.msg).slice(0, 80)}")` : ''}${f.reason ? `(${f.reason})` : ''}${f.m ? `[from=${f.m.from},tmp=${f.tmpId ?? ''},ct=${String(f.m.ct || '').slice(0, 24)}]` : ''}`).join(' | ');
+        reject(new Error(`timed out ${label ? `(${label}) ` : ''}waiting for frame; last frames: ${tail}`));
+      }
     }, 25);
   });
 }
@@ -861,6 +865,187 @@ test('PGP Room relay — end to end', async t => {
     await waitFor(conn.frames, f => f.t === 'msg' && f.m.tmpId === 'after-mute');
     assert.ok(conn.frames.length > after, 'posting works again once the mute is lifted');
     conn.ws.close();
+  });
+
+  await t.test('voice notes: their own site switch, sealed blobs, and the room gate too', async () => {
+    const V = await makeKey('voicy');
+    const talker = makeClient();
+    await talker('POST', '/api/auth/register', JSON.stringify({ username: 'talker', password: 'talker-pass-1' }));
+    await talker('POST', '/api/rooms/lounge/join');
+    await talker('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: V.fp, keyId: V.keyId, handle: 'talker', publicKey: V.publicKey }));
+    const blob = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x93, 0x42, 0x86, 0x81, 1, 2, 3, 4, 5, 6, 7, 8]);
+    const upload = (pathname, kind = 'voice', body = blob) => fetch(BASE + pathname, {
+      method: 'POST', headers: { Cookie: talker.cookie(), 'X-Content-Kind': kind, 'Content-Type': 'application/octet-stream' }, body,
+    });
+
+    // Off out of the box, even though pictures were allowed on above.
+    assert.equal((await upload('/api/rooms/lounge/files')).status, 403, 'voice has its own site switch');
+
+    // Site switch on, then the room gate: a fresh room takes no attachments yet.
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowVoice: true }));
+    const mk = await talker('POST', '/api/rooms', JSON.stringify({ name: 'Voice Room' }));
+    const rid = mk.body.room.id;
+    assert.equal((await upload(`/api/rooms/${rid}/files`)).status, 403, 'the room switch is the second gate for voice too');
+    await talker('PATCH', `/api/rooms/${rid}`, JSON.stringify({ allowFiles: true }));
+    const up = await upload(`/api/rooms/${rid}/files`);
+    assert.equal(up.status, 201, 'with the site switch on, the clip lands');
+    const { id, size } = await up.json();
+    assert.equal(size, blob.length);
+
+    // Byte-for-byte round-trip for a member; the disk copy is the same opaque blob.
+    const got = await fetch(`${BASE}/api/rooms/${rid}/files/${id}`, { headers: { Cookie: talker.cookie() } });
+    assert.equal(Buffer.compare(Buffer.from(await got.arrayBuffer()), blob), 0);
+    const stored = await readFile(path.join(dir, 'data', 'rooms', rid, 'files', `${id}.bin`));
+    assert.equal(Buffer.compare(stored, blob), 0, 'the relay holds the sealed bytes and nothing else');
+  });
+
+  await t.test('friends, blocks and DMs: account-level, sealed, and gated', async () => {
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ allowVoice: true }));
+    const A = await makeKey('dmal');
+    const B = await makeKey('dmb');
+    const al = makeClient();
+    const br = makeClient();
+    await al('POST', '/api/auth/register', JSON.stringify({ username: 'dmalpha', password: 'dmalpha-pass-1' }));
+    await al('POST', '/api/rooms/lounge/join');
+    await al('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: A.fp, keyId: A.keyId, handle: 'dmalpha', publicKey: A.publicKey }));
+    await br('POST', '/api/auth/register', JSON.stringify({ username: 'dmbravo', password: 'dmbravo-pass-1' }));
+    await br('POST', '/api/rooms/lounge/join');
+    await br('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: B.fp, keyId: B.keyId, handle: 'dmbravo', publicKey: B.publicKey }));
+
+    // Guests have no name, so no people directory, no friends, no DMs.
+    await admin('PATCH', '/api/admin/settings', JSON.stringify({ guestAccess: true }));
+    const spy = makeClient();
+    assert.equal((await spy('POST', '/api/guest', JSON.stringify({ handle: 'spy-guest' }))).status, 201);
+    assert.equal((await spy('GET', '/api/users')).status, 403);
+    assert.equal((await spy('GET', '/api/friends')).status, 403);
+    assert.equal((await spy('GET', '/api/dm/dmalpha')).status, 403);
+
+    // Discovery: search finds the name and knows it is not a friend yet.
+    const found = await al('GET', '/api/users?q=dmbravo');
+    assert.equal(found.body.users[0].username, 'dmbravo');
+    assert.equal(found.body.users[0].friend, false);
+
+    // Request → incoming → accept, and friendship lands on both sides.
+    assert.equal((await al('POST', '/api/friends/request', JSON.stringify({ username: 'dmbravo' }))).status, 200);
+    const inc = await br('GET', '/api/friends');
+    assert.equal(inc.body.incoming[0].username, 'dmalpha');
+    assert.equal(inc.body.friends.length, 0);
+    assert.equal((await br('POST', '/api/friends/accept', JSON.stringify({ username: 'dmalpha' }))).status, 200);
+    assert.ok((await al('GET', '/api/friends')).body.friends.some(f => f.username === 'dmbravo'), 'friendship lands both ways');
+    assert.equal((await br('POST', '/api/friends/accept', JSON.stringify({ username: 'dmalpha' }))).status, 400, 'nothing left to accept');
+
+    // The thread hands the client exactly what it needs to seal: the partner's key.
+    const th = await al('GET', '/api/dm/dmbravo');
+    assert.equal(th.status, 200);
+    assert.equal(th.body.publicKey, B.publicKey);
+    assert.equal(th.body.fp, B.fp);
+
+    // Live DMs across two sockets.
+    const ca = await connect(al.cookie());
+    ca.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: A.fp, handle: 'dmalpha' }));
+    await waitFor(ca.frames, f => f.t === 'welcome');
+    const cb = await connect(br.cookie());
+    cb.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: B.fp, handle: 'dmbravo' }));
+    await waitFor(cb.frames, f => f.t === 'welcome');
+
+    const ct1 = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: 'hi bravo, this is sealed' }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: B.publicKey }), await openpgp.readKey({ armoredKey: A.publicKey })],
+      signingKeys: A.priv,
+      format: 'armored',
+    });
+    ca.ws.send(JSON.stringify({ t: 'dm', to: 'dmbravo', tmpId: 'dmt1', ct: ct1 }));
+    const echo = await waitFor(ca.frames, f => f.t === 'dm' && f.tmpId === 'dmt1', 5000, 'sender echo');
+    assert.equal(echo.m.from, 'dmalpha');
+    const delivered = await waitFor(cb.frames, f => f.t === 'dm' && f.m.from === 'dmalpha' && f.m.ct === ct1, 5000, 'delivery');
+    assert.ok(delivered.m.ct.startsWith('-----BEGIN PGP MESSAGE-----'), 'only ciphertext crosses the wire');
+
+    // Bravo opens it; the relay never held anything but the armored blob.
+    const { data } = await openpgp.decrypt({
+      message: await openpgp.readMessage({ armoredMessage: delivered.m.ct }),
+      decryptionKeys: B.priv,
+      verificationKeys: await openpgp.readKey({ armoredKey: A.publicKey }),
+      format: 'utf8',
+    });
+    assert.equal(data, 'hi bravo, this is sealed');
+
+    // History and unread marks agree between devices.
+    assert.equal((await br('GET', '/api/dm/dmalpha')).body.messages.length, 1);
+    assert.equal((await br('GET', '/api/friends')).body.friends.find(f => f.username === 'dmalpha').unread, 1, 'unread counts what bravo has not opened');
+    await br('POST', '/api/dm/dmalpha/read');
+    assert.equal((await br('GET', '/api/friends')).body.friends.find(f => f.username === 'dmalpha').unread, 0);
+
+    // DM attachments: a sealed voice note, same contract as rooms.
+    const blob = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 9, 8, 7, 6, 5]);
+    const upRes = await fetch(`${BASE}/api/dm/dmbravo/files`, {
+      method: 'POST', headers: { Cookie: al.cookie(), 'X-Content-Kind': 'voice', 'Content-Type': 'application/octet-stream' }, body: blob,
+    });
+    assert.equal(upRes.status, 201, 'voice is allowed in DMs once the site switch is on');
+    const { id: voiceId } = await upRes.json();
+    const got = await fetch(`${BASE}/api/dm/dmalpha/files/${voiceId}`, { headers: { Cookie: br.cookie() } });
+    assert.equal(got.status, 200, 'the other side can fetch the sealed blob');
+    assert.equal(Buffer.compare(Buffer.from(await got.arrayBuffer()), blob), 0);
+    assert.equal((await spy('GET', `/api/dm/dmalpha/files/${voiceId}`)).status, 403, 'guests cannot fetch DM blobs');
+
+    // Block: silences DMs both ways and ends the friendship.
+    assert.equal((await al('POST', '/api/friends/block', JSON.stringify({ username: 'dmbravo' }))).status, 200);
+    const afterBlock = await al('GET', '/api/friends');
+    assert.equal(afterBlock.body.friends.length, 0);
+    assert.equal(afterBlock.body.blocked[0].username, 'dmbravo');
+    cb.ws.send(JSON.stringify({ t: 'dm', to: 'dmalpha', ct: ct1 }));
+    await waitFor(cb.frames, f => f.t === 'err' && /cannot be messaged/.test(f.msg || ''), 5000, 'block refusal');
+    assert.equal((await br('POST', '/api/friends/request', JSON.stringify({ username: 'dmalpha' }))).status, 403, 'a blocked user cannot send requests either');
+
+    // Unblock, request again, and the reverse request acts as the accept.
+    assert.equal((await al('POST', '/api/friends/unblock', JSON.stringify({ username: 'dmbravo' }))).status, 200);
+    assert.equal((await br('POST', '/api/friends/request', JSON.stringify({ username: 'dmalpha' }))).status, 200);
+    assert.equal((await al('POST', '/api/friends/request', JSON.stringify({ username: 'dmbravo' }))).status, 200);
+    assert.ok((await al('GET', '/api/friends')).body.friends.some(f => f.username === 'dmbravo'), 'asking back closes the loop');
+
+    // Nonsense targets are refused.
+    assert.equal((await al('GET', '/api/dm/nobody-here')).status, 404);
+    assert.equal((await al('GET', '/api/dm/dmalpha')).status, 404, 'nobody DMs themselves');
+
+    ca.ws.close();
+    cb.ws.close();
+  });
+
+  await t.test('deleting an account scrubs its DMs and social traces', async () => {
+    const G = await makeKey('ghosty');
+    const K = await makeKey('keeper');
+    const ghost = makeClient();
+    const keep = makeClient();
+    await ghost('POST', '/api/auth/register', JSON.stringify({ username: 'dmghost', password: 'dmghost-pass-1' }));
+    await ghost('POST', '/api/rooms/lounge/join');
+    await ghost('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: G.fp, keyId: G.keyId, handle: 'dmghost', publicKey: G.publicKey }));
+    await keep('POST', '/api/auth/register', JSON.stringify({ username: 'dmkeeper', password: 'dmkeeper-pass-1' }));
+    await keep('POST', '/api/rooms/lounge/join');
+    await keep('POST', '/api/keys', JSON.stringify({ room: 'lounge', fp: K.fp, keyId: K.keyId, handle: 'dmkeeper', publicKey: K.publicKey }));
+
+    await ghost('POST', '/api/friends/request', JSON.stringify({ username: 'dmkeeper' }));
+    await keep('POST', '/api/friends/accept', JSON.stringify({ username: 'dmghost' }));
+
+    const ck = await connect(keep.cookie());
+    ck.ws.send(JSON.stringify({ t: 'hello', room: 'lounge', fp: K.fp, handle: 'dmkeeper' }));
+    await waitFor(ck.frames, f => f.t === 'welcome');
+    const ct = await openpgp.encrypt({
+      message: await openpgp.createMessage({ text: 'see you never' }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: G.publicKey }), await openpgp.readKey({ armoredKey: K.publicKey })],
+      signingKeys: K.priv,
+      format: 'armored',
+    });
+    ck.ws.send(JSON.stringify({ t: 'dm', to: 'dmghost', ct }));
+    await waitFor(ck.frames, f => f.t === 'dm');
+    assert.equal((await keep('GET', '/api/dm/dmghost')).body.messages.length, 1);
+
+    assert.equal((await admin('POST', '/api/admin/account', JSON.stringify({ username: 'dmghost', op: 'delete' }))).status, 200);
+
+    assert.equal((await keep('GET', '/api/dm/dmghost')).status, 404, 'the thread is gone with the account');
+    assert.equal((await keep('GET', '/api/friends')).body.friends.length, 0, 'the friendship was scrubbed too');
+    let dmDirs = [];
+    try { dmDirs = await readdir(path.join(dir, 'data', 'dms')); } catch { /* none left */ }
+    assert.ok(!dmDirs.some(d => d.includes('dmghost')), 'no pair directory survives on disk');
+    ck.ws.close();
   });
 
   await t.test('an admin can reset a password and revoke a single session', async () => {

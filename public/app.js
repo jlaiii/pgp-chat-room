@@ -43,6 +43,7 @@
     lastAuthor: null, authMode: 'login', muted: false, saidBye: false,
     maxFileBytes: 0, lastReset: null,
     fx: {}, effects: [], adminPage: null, adminData: null, userFilter: '', activity: [], activityHasMore: false, eventFilter: '',
+    social: null, dm: { with: null, meta: null, seen: new Set(), keyCache: {}, pending: null },
   };
 
   const RANK = { guest: 0, user: 1, mod: 2, admin: 3, developer: 4 };
@@ -124,6 +125,7 @@
   // Attachments and retention are policy the server publishes, so the client never
   // hardcodes a window or a size cap.
   const fmtBytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  const fmtDur = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   const ttlFrom = hours => (hours == null ? null : hours * 3600000);
   const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
   const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -247,8 +249,9 @@
   function showAuth(mode) {
     state.authMode = mode || 'login';
     // A forced logout (frozen account, revoked session) must never leave a manage
-    // page floating over the sign-in screen.
+    // page or an open DM floating over the sign-in screen.
     if (state.adminPage) closePage();
+    if (state.dm.with) closeDm();
     $('appScreen').hidden = true;
     $('authScreen').hidden = false;
     for (const b of document.querySelectorAll('.auth-tab')) b.classList.toggle('on', b.dataset.mode === state.authMode);
@@ -286,6 +289,7 @@
     renderMe();
     renderRooms();
     applySettings();
+    if (state.me.kind === 'account') refreshSocial();
     const wanted = Identity.pref('room') || 'lounge';
     const target = state.rooms.find(r => r.id === wanted) || state.rooms.find(r => r.id === 'lounge') || state.rooms[0];
     if (target) await enterRoom(target.id);
@@ -324,6 +328,7 @@
     renderMe();
     renderRooms();
     applySettings();
+    if (state.me.kind === 'account') refreshSocial();
     const wanted = Identity.pref('room') || 'lounge';
     const target = state.rooms.find(r => r.id === wanted) || state.rooms.find(r => r.id === 'lounge') || state.rooms[0];
     if (target) await enterRoom(target.id);
@@ -345,6 +350,9 @@
     $('regUser').disabled = closed;
     $('regPass').disabled = closed;
     if (closed && state.authMode === 'register') $('authNote').textContent = 'Signups are closed right now.';
+    // Voice may have been switched on/off: both composers listen to the same flag.
+    updateComposerState();
+    if (state.dm.with) updateDmComposer();
   }
 
   async function promptUnlock() {
@@ -395,6 +403,7 @@
     $('railRoleNote').textContent = state.me.kind === 'guest'
       ? 'Guests can post in public rooms. Create an account to make your own rooms.'
       : '';
+    $('railSocial').hidden = state.me.kind !== 'account';
   }
 
   // The self-serve effect picker: live for staff and for accounts the developer has
@@ -514,7 +523,7 @@
     const input = $('input');
     const blocked = !state.canPost;
     input.disabled = blocked;
-    $('sendBtn').disabled = blocked || !input.value.trim();
+    $('sendBtn').disabled = blocked || (!input.value.trim() && !pendingFile);
     input.placeholder = blocked
       ? (state.muted ? 'You are muted in this room' : state.frozen ? 'This room is frozen' : 'You cannot post in this room')
       : 'Message — encrypted on this device';
@@ -522,6 +531,8 @@
     // both the site switch and the room switch have to be on.
     $('attachBtn').hidden = !state.canPost || !uploadsAllowed();
     if ($('attachBtn').hidden && pendingFile) setPending(null);
+    // Same two gates for voice, plus the site's own voice switch.
+    $('btnMic').hidden = !state.canPost || !voiceAllowedRoom();
   }
 
   async function refreshPool() {
@@ -615,16 +626,29 @@
     return { image: !!s.allowImages, video: !!s.allowVideo, file: !!s.allowFiles };
   };
 
+  // One chip painter for both composers: an attachment queued for sending shows
+  // its kind, its size (or its length, for a voice note) and a way out.
+  function paintPending(chipEl, item, clear) {
+    chipEl.innerHTML = '';
+    chipEl.hidden = !item;
+    if (!item) return;
+    const label = item.kind === 'voice' ? `Voice message · ${fmtDur(item.dur || 0)}` : `${item.name} · ${fmtBytes(item.size)}`;
+    chipEl.append(el('span', 'chip', label), el('span', 'chip', item.kind));
+    const drop = el('button', 'btn sm', 'Remove');
+    drop.onclick = clear;
+    chipEl.append(drop);
+  }
+
   function setPending(f) {
     pendingFile = f;
-    const chip = $('attachChip');
-    chip.innerHTML = '';
-    chip.hidden = !f;
-    if (!f) return;
-    chip.append(el('span', 'chip', f.name), el('span', 'chip', fmtBytes(f.size)), el('span', 'chip', f.kind));
-    const drop = el('button', 'btn sm', 'Remove');
-    drop.onclick = () => setPending(null);
-    chip.append(drop);
+    paintPending($('attachChip'), f, () => setPending(null));
+    updateComposerState();
+  }
+
+  function setDmPending(f) {
+    state.dm.pending = f;
+    paintPending($('dmChip'), f, () => setDmPending(null));
+    if (state.dm.with) updateDmComposer();
   }
 
   function pickFile() {
@@ -652,18 +676,22 @@
     return new Blob([plain], { type: desc.type || 'application/octet-stream' });
   }
 
-  function attachmentEl(desc, roomId) {
+  // `base` is where the sealed blob can be fetched: a room's or a DM thread's
+  // files endpoint. The descriptor carries its own AES key, so the same helper
+  // serves both without knowing which kind of conversation it was.
+  function attachmentEl(desc, base) {
     const wrap = el('div', 'attach');
-    wrap.append(el('div', 'attach-note', `${desc.name || 'file'} · ${fmtBytes(desc.size || 0)}`));
+    const note = desc.kind === 'voice' ? `Voice message · ${fmtDur(desc.dur || 0)}` : `${desc.name || 'file'} · ${fmtBytes(desc.size || 0)}`;
+    wrap.append(el('div', 'attach-note', note));
     const slot = el('div');
-    const open = el('button', 'btn sm', desc.kind === 'video' ? 'Load video' : desc.kind === 'image' ? 'Open picture' : 'Download file');
+    const open = el('button', 'btn sm', desc.kind === 'video' ? 'Load video' : desc.kind === 'image' ? 'Open picture' : desc.kind === 'voice' ? 'Play voice' : 'Download file');
     let done = false;
     const load = async () => {
       if (done) return;
       open.disabled = true;
       open.textContent = 'Fetching…';
       try {
-        const res = await fetch(`/api/rooms/${roomId}/files/${desc.id}`, { credentials: 'same-origin' });
+        const res = await fetch(`${base}/${desc.id}`, { credentials: 'same-origin' });
         if (!res.ok) throw new Error(res.status === 404 ? 'this attachment is gone — it followed the retention window' : `HTTP ${res.status}`);
         const blob = await openFile(desc, await res.arrayBuffer());
         const url = URL.createObjectURL(blob);
@@ -696,8 +724,9 @@
     };
     open.onclick = load;
     wrap.append(slot, open);
-    // Pictures under a couple of megabytes are cheap: show them without a tap.
-    if (desc.kind === 'image' && (desc.size || 0) <= 2 * 1048576) load();
+    // Pictures (and short voice notes) under a couple of megabytes are cheap:
+    // show them without a tap. Nothing autoplays — audio still needs its play press.
+    if ((desc.kind === 'image' || desc.kind === 'voice') && (desc.size || 0) <= 2 * 1048576) load();
     return wrap;
   }
 
@@ -731,12 +760,12 @@
   }
 
   // One place that paints a bubble's body, so an edit can repaint it in place.
-  function fillBody(body, dec, roomId, edited) {
+  function fillBody(body, dec, fileBase, edited) {
     body.innerHTML = '';
     body.classList.remove('locked', 'gone');
     if (dec && (dec.text || dec.file)) {
       if (dec.text) body.append(el('div', 'text', dec.text));
-      if (dec.file) body.append(attachmentEl(dec.file, roomId));
+      if (dec.file) body.append(attachmentEl(dec.file, fileBase));
       if (!dec.text && !dec.file) body.append(el('div', 'text', ''));
     } else if (dec) {
       body.append(el('div', 'text', ''));
@@ -781,7 +810,7 @@
     const body = el('div', 'body');
     wrap.append(body);
     if (m.deleted) tombstone(wrap, m.deletedBy, m.handle);
-    else fillBody(body, dec, m.room || (state.room && state.room.id), m.edited);
+    else fillBody(body, dec, `/api/rooms/${m.room || (state.room && state.room.id)}/files`, m.edited);
     const acts = el('div', 'msg-acts');
     if (own) {
       const b = el('button', 'act', 'Edit');
@@ -861,7 +890,7 @@
         const nd = await decryptFrom({ ct, fp: m.fp });
         m.edited = Date.now();
         delete body.dataset.editing;
-        fillBody(body, nd, m.room || (state.room && state.room.id), true);
+        fillBody(body, nd, `/api/rooms/${m.room || (state.room && state.room.id)}/files`, true);
         toast('Message edited');
       } catch (e) {
         save.disabled = false;
@@ -941,6 +970,8 @@
 
   const atBottom = () => { const l = $('log'); return l.scrollHeight - l.scrollTop - l.clientHeight < 140; };
   function scrollBottom(force) { const l = $('log'); if (force || atBottom()) l.scrollTop = l.scrollHeight; }
+  function atDmBottom() { const l = $('dmBody'); return l.scrollHeight - l.scrollTop - l.clientHeight < 60; }
+  function scrollDmBottom(force) { const l = $('dmBody'); if (force || atDmBottom()) l.scrollTop = l.scrollHeight; }
 
   /* ---------------- websocket ---------------- */
 
@@ -1025,7 +1056,7 @@
       if (!node) return;
       const dec = await decryptFrom({ ct: m.ct, fp: node.dataset.fp });
       const body = node.querySelector('.body');
-      if (body && dec) fillBody(body, dec, state.room && state.room.id, true);
+      if (body && dec) fillBody(body, dec, `/api/rooms/${state.room && state.room.id}/files`, true);
       return;
     }
     if (m.t === 'sys') { addSys(m.text, m.ts || Date.now(), m.notice); scrollBottom(); return; }
@@ -1041,6 +1072,8 @@
       rerenderNames(m.username);
       return;
     }
+    if (m.t === 'dm') { onDmFrame(m); return; }
+    if (m.t === 'social') { refreshSocial(); return; }
     if (m.t === 'settings') {
       state.settings = m.settings || state.settings;
       if (m.retentionHours !== undefined) { state.ttlMs = ttlFrom(m.retentionHours); setRetentionNote(); }
@@ -1097,7 +1130,7 @@
     const body = el('div', 'body');
     if (text) body.append(el('div', 'text', text));
     if (queued) {
-      body.append(el('div', 'attach-note', `${queued.name} · ${fmtBytes(queued.size)} — sealing…`));
+      body.append(el('div', 'attach-note', queued.kind === 'voice' ? 'Voice message — sealing…' : `${queued.name} · ${fmtBytes(queued.size)} — sealing…`));
       setPending(null);
     }
     wrap.append(head, body);
@@ -1116,7 +1149,7 @@
         if (!res.ok) throw new Error((out && out.error) || `upload failed (${res.status})`);
         descriptor = {
           id: out.id, key: sealed.key, iv: sealed.iv,
-          name: queued.name, type: queued.file.type || '', size: queued.size, kind: queued.kind,
+          name: queued.name, type: queued.file.type || '', size: queued.size, kind: queued.kind, dur: queued.dur,
         };
       }
       const payload = descriptor ? JSON.stringify({ text, file: descriptor }) : text;
@@ -1126,6 +1159,475 @@
       wrap.remove();
       toast(`Could not send: ${e.message}`, 4200);
     }
+  }
+
+  /* ---------------- voice messages ---------------- */
+
+  // One recorder for the whole app: it feeds either the room composer or the DM
+  // composer, never both, and the clip is sealed exactly like a picture — a one-off
+  // AES-GCM key that travels inside the PGP message — so the relay stores a blob it
+  // cannot listen to any more than it can read the text.
+  const VOICE_MAX_MS = 120000;
+  const voice = { rec: null, stream: null, chunks: [], mime: '', timer: null, startedAt: 0, cancel: false, target: null, stopRequested: false };
+  const voiceSupported = () => !!(window.MediaRecorder && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+  const settingsAllowVoice = () => !!((state.settings || {}).allowVoice);
+  const voiceAllowedRoom = () => voiceSupported() && settingsAllowVoice() && !!(currentRoom() && currentRoom().allowFiles);
+  const voiceAllowedDm = () => voiceSupported() && settingsAllowVoice();
+
+  async function startVoice(target) {
+    if (voice.rec) return;
+    if (!voiceSupported()) { toast('This browser cannot record audio', 3600); return; }
+    if (!settingsAllowVoice()) { toast('Voice messages are switched off right now', 4200); return; }
+    if (target === 'dm' && (!state.dm.with || (state.dm.meta && state.dm.meta.blocked))) { toast('Voice messages are not available here', 3600); return; }
+    if (target === 'room' && !voiceAllowedRoom()) { toast('Voice messages are not available here', 3600); return; }
+    try { voice.stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch { toast('Microphone permission was refused', 3600); return; }
+    const prefer = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+    voice.mime = prefer.find(t => window.MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+    try { voice.rec = new MediaRecorder(voice.stream, voice.mime ? { mimeType: voice.mime } : undefined); }
+    catch { stopStream(); toast('Could not start recording', 3600); return; }
+    voice.chunks = []; voice.cancel = false; voice.stopRequested = false;
+    voice.target = target; voice.startedAt = Date.now();
+    voice.rec.ondataavailable = e => { if (e.data && e.data.size) voice.chunks.push(e.data); };
+    voice.rec.onstop = () => finishVoice();
+    voice.rec.start(300);
+    voice.timer = setInterval(paintRecording, 200);
+    const mb = target === 'dm' ? $('dmMicBtn') : $('btnMic');
+    if (mb) mb.classList.add('rec');
+    paintRecording();
+  }
+
+  function stopStream() {
+    if (voice.timer) { clearInterval(voice.timer); voice.timer = null; }
+    if (voice.stream) { try { for (const t of voice.stream.getTracks()) t.stop(); } catch { /* ignore */ } voice.stream = null; }
+  }
+
+  function stopVoice(cancel) {
+    if (!voice.rec || voice.stopRequested) return;
+    voice.stopRequested = true;
+    if (cancel) voice.cancel = true;
+    try { voice.rec.stop(); } catch { /* already stopped */ }
+  }
+
+  function paintRecording() {
+    if (!voice.rec) return;
+    const chip = voice.target === 'dm' ? $('dmChip') : $('attachChip');
+    chip.innerHTML = '';
+    chip.hidden = false;
+    const secs = Math.floor((Date.now() - voice.startedAt) / 1000);
+    chip.append(el('span', 'chip rec-chip', `● recording ${fmtDur(secs)}`));
+    const x = el('button', 'btn sm', 'Cancel');
+    x.onclick = () => stopVoice(true);
+    const ok = el('button', 'btn sm primary', 'Finish');
+    ok.onclick = () => stopVoice(false);
+    chip.append(x, ok);
+    if (Date.now() - voice.startedAt >= VOICE_MAX_MS) stopVoice(false);
+  }
+
+  function finishVoice() {
+    const target = voice.target;
+    const cancelled = voice.cancel;
+    const mime = voice.mime || 'audio/webm';
+    const chunks = voice.chunks.slice();
+    const ms = Date.now() - voice.startedAt;
+    voice.rec = null; voice.chunks = []; voice.target = null; voice.cancel = false; voice.stopRequested = false;
+    stopStream();
+    $('btnMic').classList.remove('rec');
+    $('dmMicBtn').classList.remove('rec');
+    const chip = target === 'dm' ? $('dmChip') : $('attachChip');
+    chip.innerHTML = ''; chip.hidden = true;
+    // While the recorder owned the chip, a queued attachment may still exist: put
+    // its chip back rather than leaving the composer looking empty.
+    if (target === 'dm') setDmPending(state.dm.pending); else setPending(pendingFile);
+    if (cancelled) return;
+    if (!chunks.length || ms < 700) { toast('That was too short — try again', 3000); return; }
+    const blob = new Blob(chunks, { type: mime });
+    if (state.maxFileBytes && blob.size > state.maxFileBytes) { toast(`That clip is ${fmtBytes(blob.size)} — the cap is ${fmtBytes(state.maxFileBytes)}`, 4600); return; }
+    const ext = mime.includes('ogg') ? 'ogg' : mime.includes('mp4') ? 'm4a' : 'webm';
+    const file = new File([blob], `voice-message.${ext}`, { type: mime });
+    const item = { file, name: 'Voice message', size: blob.size, kind: 'voice', dur: Math.max(1, Math.round(ms / 1000)) };
+    if (target === 'dm') setDmPending(item); else setPending(item);
+  }
+
+  /* ---------------- friends ---------------- */
+
+  async function refreshSocial() {
+    if (!state.me || state.me.kind !== 'account') return;
+    let next;
+    try { next = await api('/api/friends'); } catch { return; /* keep the old list; a social frame retries */ }
+    const before = state.social;
+    // Tell the person, not just the list: new requests and fresh friendships get
+    // a toast — otherwise a request waits silently until someone opens the sheet.
+    if (next && before) {
+      const hadReq = new Set((before.incoming || []).map(r => r.username));
+      for (const r of next.incoming || []) {
+        if (!hadReq.has(r.username)) { toast(`${r.username} wants to be friends`, 4200); break; }
+      }
+      const hadFriend = new Set((before.friends || []).map(f => f.username));
+      for (const f of next.friends || []) {
+        if (!hadFriend.has(f.username)) { toast(`You and ${f.username} are friends now`, 3600); break; }
+      }
+    }
+    state.social = next;
+    renderFriends();
+  }
+
+  function renderFriends() {
+    const s = state.social;
+    if (!s) return;
+    let unread = 0;
+    for (const f of s.friends || []) unread += f.unread || 0;
+    const badge = $('friendsBadge');
+    badge.hidden = !unread;
+    badge.textContent = unread > 99 ? '99+' : String(unread);
+
+    // Requests: incoming wants a yes/no, outgoing wants a way to take it back.
+    const reqWrap = $('friendReqWrap');
+    const reqBox = $('friendReqs');
+    reqBox.innerHTML = '';
+    const reqs = [
+      ...(s.incoming || []).map(r => ({ ...r, dir: 'in' })),
+      ...(s.outgoing || []).map(r => ({ ...r, dir: 'out' })),
+    ];
+    reqWrap.hidden = !reqs.length;
+    for (const r of reqs) {
+      const row = el('div', 'person-row');
+      row.append(personDot(r.online), nameEl(r.username, 'person-name'));
+      row.append(el('span', 'person-sub', r.dir === 'in' ? 'wants to be friends' : 'request sent'));
+      const acts = el('span', 'person-acts');
+      if (r.dir === 'in') {
+        const a = el('button', 'btn sm primary', 'Accept');
+        a.onclick = () => socialOp('accept', r.username);   // the friendship toast comes from the list diff
+        const d = el('button', 'btn sm', 'Decline');
+        d.onclick = () => socialOp('decline', r.username);
+        acts.append(a, d);
+      } else {
+        const c = el('button', 'btn sm', 'Cancel');
+        c.onclick = () => socialOp('decline', r.username);
+        acts.append(c);
+      }
+      row.append(acts);
+      reqBox.append(row);
+    }
+
+    const box = $('friendList');
+    box.innerHTML = '';
+    if (!(s.friends || []).length) box.append(el('p', 'hint', 'No friends yet. Search a username above and send a request.'));
+    for (const f of s.friends || []) {
+      const row = el('div', 'person-row');
+      row.append(personDot(f.online), nameEl(f.username, 'person-name'));
+      const sub = f.unread ? `${f.unread} new message${f.unread > 1 ? 's' : ''}` : f.lastTs ? `last message ${relTime(f.lastTs)}` : (f.online ? 'online' : 'offline');
+      row.append(el('span', 'person-sub', sub));
+      const acts = el('span', 'person-acts');
+      const open = el('button', 'btn sm primary', 'Message');
+      open.onclick = () => { closeSheets(); openDm(f.username); };
+      const rm = el('button', 'btn sm', 'Remove');
+      rm.onclick = async () => {
+        const ok = await dialog({ title: `Remove ${f.username}?`, body: 'You stay in touch only if one of you sends a new request.', confirm: 'Remove' });
+        if (ok) socialOp('remove', f.username);
+      };
+      const blk = el('button', 'btn sm danger', 'Block');
+      blk.onclick = async () => {
+        const ok = await dialog({ title: `Block ${f.username}?`, body: 'They cannot message you or send requests, and the friendship ends. You can unblock any time.', confirm: 'Block', danger: true });
+        if (ok) socialOp('block', f.username);
+      };
+      acts.append(open, rm, blk);
+      row.append(acts);
+      box.append(row);
+    }
+
+    const bWrap = $('friendBlockedWrap');
+    const bBox = $('friendBlocked');
+    bBox.innerHTML = '';
+    bWrap.hidden = !(s.blocked || []).length;
+    for (const b of s.blocked || []) {
+      const row = el('div', 'person-row');
+      row.append(nameEl(b.username, 'person-name'));
+      const acts = el('span', 'person-acts');
+      const un = el('button', 'btn sm', 'Unblock');
+      un.onclick = () => socialOp('unblock', b.username);
+      acts.append(un);
+      row.append(acts);
+      bBox.append(row);
+    }
+  }
+
+  const personDot = online => el('span', 'dot ' + (online ? 'on' : 'off'));
+
+  async function socialOp(op, username, okMsg) {
+    try {
+      await api(`/api/friends/${op}`, { method: 'POST', body: { username } });
+      if (okMsg) toast(okMsg);
+      if (op === 'block' && state.dm.with === username) { state.dm.meta = { ...(state.dm.meta || {}), blocked: true }; paintDmNotice(); updateDmComposer(); }
+      if (op === 'unblock' && state.dm.with === username) { state.dm.meta = { ...(state.dm.meta || {}), blocked: false }; paintDmNotice(); updateDmComposer(); }
+      await refreshSocial();
+    } catch (e) { toast(e.message, 4200); }
+  }
+
+  async function searchPeople() {
+    const q = $('friendSearch').value.trim().toLowerCase();
+    const box = $('friendResults');
+    box.innerHTML = '';
+    let users = [];
+    try { users = (await api(`/api/users${q ? `?q=${encodeURIComponent(q)}` : ''}`)).users || []; }
+    catch (e) { toast(e.message, 3600); return; }
+    if (!users.length) { box.append(el('p', 'hint', 'Nobody here by that name.')); return; }
+    for (const u of users) {
+      const row = el('div', 'person-row');
+      row.append(personDot(u.online), nameEl(u.username, 'person-name'));
+      row.append(el('span', 'person-sub', u.online ? 'online' : 'offline'));
+      const acts = el('span', 'person-acts');
+      if (u.blocked) acts.append(el('span', 'chip', 'blocked'));
+      else if (u.friend) {
+        const m = el('button', 'btn sm primary', 'Message');
+        m.onclick = () => { closeSheets(); openDm(u.username); };
+        acts.append(m);
+      } else if (u.requested) acts.append(el('span', 'chip', 'requested'));
+      else {
+        const add = el('button', 'btn sm', 'Add friend');
+        add.onclick = async () => {
+          try {
+            await api('/api/friends/request', { method: 'POST', body: { username: u.username } });
+            toast(`Request sent to ${u.username}`);
+            await refreshSocial();
+            searchPeople();
+          } catch (e) { toast(e.message, 3600); }
+        };
+        const m = el('button', 'btn sm', 'Message');
+        m.onclick = () => { closeSheets(); openDm(u.username); };
+        acts.append(add, m);
+      }
+      row.append(acts);
+      box.append(row);
+    }
+  }
+
+  /* ---------------- direct messages ---------------- */
+
+  const dmBase = user => `/api/dm/${encodeURIComponent(user)}/files`;
+
+  // Sealed to the partner AND the author — both sides of the thread can read every
+  // row with only their own private key, and the relay gets nothing but ciphertext.
+  async function encryptDmTo(text, partnerKey) {
+    return openpgp.encrypt({
+      message: await openpgp.createMessage({ text }),
+      encryptionKeys: [partnerKey, state.id.publicKeyObj],
+      signingKeys: state.id.privateKey,
+      format: 'armored',
+    });
+  }
+
+  async function decryptDm(m) {
+    try {
+      const message = await openpgp.readMessage({ armoredMessage: m.ct });
+      const options = { message, decryptionKeys: state.id.privateKey, format: 'utf8' };
+      const mine = m.from === (state.me && state.me.username);
+      const senderKey = mine ? state.id.publicKeyObj : (state.dm.with ? state.dm.keyCache[state.dm.with] : null);
+      if (senderKey) options.verificationKeys = senderKey;
+      const { data } = await openpgp.decrypt(options);
+      return parsePayload(typeof data === 'string' ? data : String(data));
+    } catch { return null; }
+  }
+
+  async function openDm(username) {
+    if (!state.me || state.me.kind !== 'account') return;
+    state.dm.with = username;
+    state.dm.seen = new Set();
+    state.dm.meta = null;
+    state.dm.lastAuthor = null;
+    setDmPending(null);
+    $('dmView').hidden = false;
+    $('dmTitle').textContent = username;
+    $('dmDot').className = 'dot off';
+    $('dmNotice').hidden = true;
+    $('dmMsgs').innerHTML = '';
+    $('dmInput').value = '';
+    dmAutoGrow();
+    updateDmComposer();
+    try {
+      const t = await api(`/api/dm/${username}`);
+      if (state.dm.with !== username) return;   // navigated away while it loaded
+      state.dm.meta = t;
+      state.dm.keyCache[username] = await openpgp.readKey({ armoredKey: t.publicKey });
+      $('dmDot').className = 'dot ' + (t.online ? 'on' : 'off');
+      $('dmDot').title = t.online ? 'online' : 'offline';
+      paintDmNotice();
+      updateDmComposer();
+      for (const m of t.messages || []) {
+        if (state.dm.seen.has(m.id)) continue;
+        state.dm.seen.add(m.id);
+        await appendDmMessage(m);
+      }
+      scrollDmBottom(true);
+      markDmRead();
+    } catch (e) {
+      toast(e.message, 4600);
+      closeDm();
+    }
+  }
+
+  function closeDm() {
+    if (voice.rec && voice.target === 'dm') stopVoice(true);
+    state.dm.with = null;
+    state.dm.meta = null;
+    state.dm.seen = new Set();
+    state.dm.lastAuthor = null;
+    setDmPending(null);
+    $('dmView').hidden = true;
+    refreshSocial();
+  }
+
+  function dmNode(m, own, dec) {
+    const wrap = el('div', 'msg' + (own ? ' own' : ''));
+    if (m.id) wrap.dataset.mid = m.id;
+    if (state.dm.lastAuthor !== m.from) {
+      const head = el('div', 'meta');
+      const who = nameEl(own ? (state.me.handle || state.me.username) : m.from, 'who');
+      head.append(who, timeEl(m.t));
+      wrap.append(head);
+    }
+    state.dm.lastAuthor = m.from;
+    const body = el('div', 'body');
+    wrap.append(body);
+    fillBody(body, dec, dmBase(state.dm.with || ''), false);
+    return wrap;
+  }
+
+  async function appendDmMessage(m) {
+    const own = m.from === state.me.username;
+    const dec = await decryptDm(m);
+    $('dmMsgs').append(dmNode(m, own, dec));
+  }
+
+  async function onDmFrame(frame) {
+    const m = frame.m;
+    if (!m || !m.from) return;
+    const other = m.from === state.me.username ? m.to : m.from;
+    if (state.dm.with === other) {
+      if (frame.tmpId) {
+        const node = document.querySelector(`#dmMsgs [data-tmp-id="${frame.tmpId}"]`);
+        if (node) {
+          const dec = await decryptDm(m);
+          state.dm.lastAuthor = null;   // let the fresh node redraw its head honestly
+          node.replaceWith(dmNode(m, true, dec));
+          return;
+        }
+      }
+      if (state.dm.seen.has(m.id)) return;
+      state.dm.seen.add(m.id);
+      const sticky = atDmBottom();
+      await appendDmMessage(m);
+      scrollDmBottom(sticky);
+      if (m.from !== state.me.username) markDmRead();
+    } else if (m.from !== state.me.username) {
+      toast(`New message from ${m.from}`, 3600);
+      refreshSocial();
+    }
+  }
+
+  function paintDmNotice() {
+    const t = state.dm.meta || {};
+    const n = $('dmNotice');
+    n.hidden = !t.blocked;
+    if (t.blocked) n.textContent = 'Messaging is off between you two right now — unblock in Friends to talk again.';
+  }
+
+  function updateDmComposer() {
+    const open = !!state.dm.with;
+    const blocked = !!(state.dm.meta && state.dm.meta.blocked);
+    const input = $('dmInput');
+    input.disabled = !open || blocked;
+    $('dmSendBtn').disabled = !open || blocked || (!input.value.trim() && !state.dm.pending);
+    input.placeholder = !open ? 'Message — encrypted on this device'
+      : blocked ? 'You cannot message this user right now'
+        : 'Message — encrypted on this device';
+    $('dmAttachBtn').hidden = !open || blocked || !dmUploadsAllowed();
+    $('dmMicBtn').hidden = !open || blocked || !voiceAllowedDm();
+  }
+
+  const dmUploadsAllowed = () => {
+    const s = state.settings || {};
+    return !!(s.allowImages || s.allowVideo || s.allowFiles);
+  };
+
+  function dmAutoGrow() {
+    const i = $('dmInput');
+    i.style.height = 'auto';
+    i.style.height = `${Math.min(140, i.scrollHeight)}px`;
+  }
+
+  let dmReadTimer = null;
+  function markDmRead() {
+    if (!state.dm.with || dmReadTimer) return;
+    dmReadTimer = setTimeout(async () => {
+      dmReadTimer = null;
+      const u = state.dm.with;
+      if (!u) return;
+      try { await api(`/api/dm/${u}/read`, { method: 'POST' }); refreshSocial(); } catch { /* next visit retries */ }
+    }, 800);
+  }
+
+  async function dmSendCurrent() {
+    const input = $('dmInput');
+    const target = state.dm.with;
+    const text = input.value.trim();
+    const queued = state.dm.pending;
+    if (!target || (!text && !queued)) return;
+    if (state.dm.meta && state.dm.meta.blocked) { toast('Messaging is off between you two right now', 3600); return; }
+    if (!state.ws || state.ws.readyState !== 1) { toast('You are not connected right now', 3600); return; }
+    const key = state.dm.keyCache[target];
+    if (!key) { toast('This user has no key on file yet', 3600); return; }
+    input.value = '';
+    dmAutoGrow();
+    updateDmComposer();
+    const tmpId = `d${Date.now()}${Math.random().toString(16).slice(2, 6)}`;
+    const wrap = el('div', 'msg own');
+    wrap.dataset.tmpId = tmpId;
+    const head = el('div', 'meta');
+    const who = nameEl(state.me.handle || state.me.username, 'who');
+    head.append(who, timeEl(Date.now()));
+    wrap.append(head);
+    const body = el('div', 'body');
+    if (text) body.append(el('div', 'text', text));
+    if (queued) body.append(el('div', 'attach-note', queued.kind === 'voice' ? 'Voice message — sealing…' : `${queued.name} · ${fmtBytes(queued.size)} — sealing…`));
+    wrap.append(body);
+    $('dmMsgs').append(wrap);
+    setDmPending(null);
+    scrollDmBottom(true);
+    try {
+      let descriptor = null;
+      if (queued) {
+        const sealed = await sealFile(queued.file);
+        const res = await fetch(`/api/dm/${target}/files`, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/octet-stream', 'X-Content-Kind': queued.kind },
+          body: sealed.bytes,
+        });
+        const out = await res.json().catch(() => null);
+        if (!res.ok) throw new Error((out && out.error) || `upload failed (${res.status})`);
+        descriptor = {
+          id: out.id, key: sealed.key, iv: sealed.iv,
+          name: queued.name, type: queued.file.type || '', size: queued.size, kind: queued.kind, dur: queued.dur,
+        };
+      }
+      const payload = descriptor ? JSON.stringify({ text, file: descriptor }) : text;
+      const ct = await encryptDmTo(payload, key);
+      wsSend({ t: 'dm', to: target, tmpId, ct });
+    } catch (e) {
+      wrap.remove();
+      toast(`Could not send: ${e.message}`, 4200);
+    }
+  }
+
+  function pickDmFile() {
+    const kinds = allowedKinds();
+    const accept = [];
+    if (kinds.image) accept.push('image/*');
+    if (kinds.video) accept.push('video/*');
+    if (kinds.file) accept.push('*/*');
+    const input = $('dmAttachInput');
+    input.accept = accept.join(',') || '';
+    input.click();
   }
 
   /* ---------------- key sheet ---------------- */
@@ -1273,8 +1775,10 @@
     if (state.ws) { try { state.ws.close(); } catch { /* ignore */ } state.ws = null; }
     state.me = null;
     state.room = null;
+    state.social = null;
     closeSheets();
     if (state.adminPage) closePage();
+    if (state.dm.with) closeDm();
     showAuth('login');
   }
 
@@ -2043,6 +2547,7 @@
       mkToggle('Pictures (images)', 'allowImages', 'Pictures can be attached at all. Every room has its own switch on top of this.'),
       mkToggle('Video', 'allowVideo', 'Video attachments, same two gates as pictures.'),
       mkToggle('Other files', 'allowFiles', 'Documents, archives, audio — anything that is not an image or video.'),
+      mkToggle('Voice messages', 'allowVoice', 'Recorded voice notes, in rooms and direct messages. Sealed in the browser like every other attachment.'),
     );
     body.append(policy);
 
@@ -2316,6 +2821,42 @@
       $('input').focus();
     };
     $('attachBtn').onclick = pickFile;
+    $('dmAttachBtn').onclick = pickDmFile;
+    $('dmAttachInput').onchange = e => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!f) return;
+      const kind = kindOf(f);
+      const kinds = allowedKinds();
+      if (!kinds[kind]) {
+        toast(kind === 'image' ? 'Pictures are switched off right now' : kind === 'video' ? 'Video is switched off right now' : 'File sending is switched off right now', 4200);
+        return;
+      }
+      if (state.maxFileBytes && f.size > state.maxFileBytes) {
+        toast(`That file is ${fmtBytes(f.size)} — the cap is ${fmtBytes(state.maxFileBytes)}`, 4600);
+        return;
+      }
+      setDmPending({ file: f, name: f.name, size: f.size, kind });
+      $('dmInput').focus();
+    };
+    $('btnMic').onclick = () => {
+      if (voice.rec && voice.target === 'room') stopVoice(false);
+      else if (!voice.rec) startVoice('room');
+    };
+    $('dmMicBtn').onclick = () => {
+      if (voice.rec && voice.target === 'dm') stopVoice(false);
+      else if (!voice.rec) startVoice('dm');
+    };
+    $('btnFriends').onclick = () => { closeSheets(); openSheet($('friendsSheet')); renderFriends(); refreshSocial(); searchPeople(); };
+    $('friendSearchBtn').onclick = searchPeople;
+    $('friendSearch').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); searchPeople(); } });
+    $('dmBack').onclick = closeDm;
+    $('dmSendBtn').onclick = dmSendCurrent;
+    const dmInput = $('dmInput');
+    dmInput.addEventListener('input', () => { dmAutoGrow(); updateDmComposer(); });
+    dmInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 700) { e.preventDefault(); dmSendCurrent(); }
+    });
     $('saveHandle').onclick = saveHandle;
     $('backupKey').onclick = () => Identity.backup(state.id);
     $('restoreKey').onchange = async e => {
@@ -2387,6 +2928,7 @@
     document.addEventListener('keydown', e => {
       if (e.key !== 'Escape') return;
       if (!$('scrim').hidden) closeSheets();
+      else if (!$('dmView').hidden) closeDm();
       else if (state.adminPage) closePage();
     });
     // Tapping anywhere but the bubble puts a revealed action row away again.

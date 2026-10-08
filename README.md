@@ -32,11 +32,22 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   room; mods handle people and rooms; the owner of a room controls that room. The **developer** seat
   sits above admin (handpicked name effects; the only role that outranks an admin) and is deliberately
   set on the box, never over the wire.
-- **Pictures, video and files — off until an admin says otherwise.** Attachments are gated twice:
-  a site-wide switch per kind (pictures / video / other files) and the room's own switch. Both are
-  off out of the box, so a fresh relay takes text only. A file is sealed in the browser with a
-  one-off AES-GCM key, and **that key travels inside the room's OpenPGP message** — the relay stores
-  a blob it cannot open, and never learns the filename.
+- **Pictures, video, files and voice notes — off until an admin says otherwise.** Attachments are
+  gated twice: a site-wide switch per kind (pictures / video / other files / **voice**) and the room's
+  own switch. All are off out of the box, so a fresh relay takes text only. A file — or a recorded
+  voice note — is sealed in the browser with a one-off AES-GCM key, and **that key travels inside the
+  room's OpenPGP message** — the relay stores a blob it cannot open, and never learns the filename.
+- **Voice messages.** A mic button in the composer records a clip (up to 2 minutes), which is sealed
+  exactly like a picture and sent as a message with an inline player. The **Voice messages** switch in
+  *Settings* turns them on or off site-wide, live for every open client; rooms that take attachments
+  take voice notes, and direct messages follow the same site switch.
+- **Direct messages and friends.** Any account can search the user list, send a friend request
+  (accept, decline, cancel, remove — both sides get told live), or open a **one-to-one thread** with
+  anyone who is not blocked. DMs are encrypted to both participants' keys: the relay routes and stores
+  ciphertext, its session-list view never learns a word, and **nothing about who talks to whom goes in
+  the audit log** — not even for the operator. Voice notes and attachments work in DMs under the same
+  site switches, sealed the same way. **Block** silences someone completely (no DMs, no requests, and
+  it ends the friendship), reversibly, without them being notified either way.
 - **The message lifetime is a setting, not a rebuild.** An admin picks 1 hour … 30 days, or *keep
   until cleared by hand*. Shortening the window sweeps the relay the moment it is applied, and
   attachments follow the same window as the messages that point at them.
@@ -52,11 +63,13 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   mods, freeze a room, **slow mode** (a per-room floor between one identity's posts), **burn a room's
   stored ciphertext on the spot**, delete a room (its key pool, ciphertext and attachments are
   shredded with it).
-- **Admin panel.** Six tabs — overview, activity, people, rooms, bans, settings. Close signups, stop
-  new rooms, stop guests, **lock every room down with one switch**, set a site-wide notice, push a
-  relay notice into a room, **reset a password** (the generated one is shown once and never logged),
-  sign an account out everywhere or revoke one session, delete an account (its rooms pass to the
-  admin, never orphaned), and watch totals, a 7-day sparkline and who is online right now.
+- **Admin panel.** The hamburger menu's *Manage* section: dashboard, activity, **users**, rooms,
+  bans & mutes, settings — one page per job. Freeze an account (lock the door: sessions dropped, sign-in
+  refused, data kept), close signups, stop new rooms, stop guests, **lock every room down with one switch**,
+  set a site-wide notice, push a relay notice into a room, **reset a password** (the generated one is
+  shown once and never logged), sign an account out everywhere or revoke one session, delete an account
+  (its rooms pass to the admin, its DMs and social traces are scrubbed, never orphaned), and watch
+  totals, a 7-day sparkline and who is online right now.
 - **The activity log lives on the site, not in your phone.** Every join, leave, key registration,
   ban, role change and sign-in attempt streams into the admin panel live. Filter it by kind, or
   download the raw `.jsonl`. Mods see the same trail minus admin-only rows and IP addresses; the
@@ -89,6 +102,8 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | bans (target, scope, expiry, reason) | attachments (they are encrypted client-side) |
 | tombstone rows for deleted messages: who, when, who deleted it | the ciphertext of a deleted or edited message — both are shredded |
 | attachment blobs: how many bytes, in which room, uploaded when, by whom | what any file *is* — no name, no type, no content |
+| direct messages: who ↔ who a thread is between, row times, sealed blob sizes | what any DM says — sealed to the two participants' keys; **DMs are not in the audit trail at all** |
+| friend requests, friendships and blocks: which accounts list which | who declined whom, and the reasons people talk |
 | the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
 | the site notice text and which accounts wear which name effect | |
 | message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
@@ -141,18 +156,25 @@ Rooms and Settings:
 | **Users** | every account as a card — role, sessions, key fingerprint, last sign-in — with search; **freeze/unfreeze**, promote/demote, **mute**, **reset password**, sign out everywhere, delete, ban/unban, and — for the developer — the name-effect picker — plus every live session with a one-click revoke and an accounts export (admins) |
 | **Rooms** | rename/about, **slow mode**, freeze, guest access, **attachments on/off**, take ownership, clear everyone out, clear stored ciphertext now, delete |
 | **Bans & mutes** | place a ban against an account, a device fingerprint or an IP, site-wide or in one room, for 1 hour to 30 days (or permanent), with a reason they are shown — or a **mute**, which is the same thing without ending their session. One button lifts them all |
-| **Settings** | allow new rooms, guests, signups; **pictures / video / other files**; **who may delete and edit a message**; the **message lifetime**; the site notice; announcements; and **lockdown** |
+| **Settings** | allow new rooms, guests, signups; **pictures / video / other files / voice messages**; **who may delete and edit a message**; the **message lifetime**; the site notice; announcements; and **lockdown** |
 
 **Freeze** locks the account door: sessions are dropped and sign-in is refused until unfrozen.
 Messages, keys and room memberships are untouched — that is what **ban** is for.
 
 **Attachments** are switched on twice, on purpose: the site switch says which *kinds* may be sent at
-all, and each room says whether it accepts them. Neither is on by default. A file is encrypted with a
-one-off AES-GCM key in the browser and uploaded as opaque bytes; the key is addressed to the room
-inside the same OpenPGP message as the caption. The relay can hand the blob back but can never open
-it. Two honest caveats: the kind (image / video / file) is **declared by the sending client**, because
-the relay has no way to inspect sealed bytes — the switches are policy, not a content filter; and an
-attachment dies with the retention window, so an old message can point at bytes that are already gone.
+all, and each room says whether it accepts them. Neither is on by default. A file — or a voice note,
+which rides the same rails — is encrypted with a one-off AES-GCM key in the browser and uploaded as
+opaque bytes; the key is addressed to the room inside the same OpenPGP message as the caption. The
+relay can hand the blob back but can never open (or listen to) it. Two honest caveats: the kind
+(image / video / file / voice) is **declared by the sending client**, because the relay has no way to
+inspect sealed bytes — the switches are policy, not a content filter; and an attachment dies with the
+retention window, so an old message can point at bytes that are already gone.
+
+**Direct messages** ride the same contract, one rung tighter: each row is sealed to *both*
+participants' keys (so both sides of the thread can read it and the relay can read neither), blobs are
+sealed with the same one-off AES-GCM key inside the message, and the pair's storage is
+`data/dms/<a>__<b>/` — rows, read marks and blobs, swept by the same retention window and shredded
+when an account is deleted.
 
 **Key sync is on by default, and it is the account's key that syncs.** Registering saves the key to
 the account as a sealed envelope; signing in restores it onto the device, so the same key reads your
@@ -217,10 +239,13 @@ claim code stays the fallback for a vacated seat, the admin log is staff-only an
 claim code, lockdown closes the doors, slow mode throttles one identity but not staff, announcements
 are never stored as messages, account deletion hands over the rooms, an admin can burn a room's
 ciphertext on the spot, attachments stay off until both switches are on and round-trip byte for byte,
-a mute blocks posting without ending the session, a password reset and a single-session revoke both
-stick, the message lifetime is policy, deleting your own message leaves a tombstone with no
-ciphertext on disk while a stranger's is refused, editing replaces the ciphertext rather than keeping
-both, and staff can delete anyone's message but never edit one. CI runs it on every push.
+voice notes ride their own site switch and the room gate, friends/requests/blocks behave in both
+directions, DMs deliver live as ciphertext and only to the two participants (guests are refused
+outright), blocking silences DMs and requests, deleting an account scrubs its threads and social
+traces, a mute blocks posting without ending the session, a password reset and a single-session
+revoke both stick, the message lifetime is policy, deleting your own message leaves a tombstone with
+no ciphertext on disk while a stranger's is refused, editing replaces the ciphertext rather than
+keeping both, and staff can delete anyone's message but never edit one. CI runs it on every push.
 
 ## Honest limits
 

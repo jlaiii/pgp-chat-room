@@ -31,7 +31,9 @@ hash never touches a message and cannot decrypt anything.
 | `lib/auth.js` | accounts (scrypt), sessions (30-day tokens), roles, bans (site-wide and per-room) |
 | `lib/rooms.js` | room registry, membership, `can(actor, action, room)` — **all permissions live here** so HTTP and WS cannot drift |
 | `lib/chat.js` | per-room key pools, per-room per-day ciphertext segments, sealed attachment blobs, retention shredder (rows and files), room teardown |
-| `lib/settings.js` | the site policy the admin panel flips (new rooms, guests, signups, lockdown, notice board) plus the bootstrap claim code |
+| `lib/social.js` | friends, requests and blocks (`data/social.json`) — pure relationship state, no message data |
+| `lib/dm.js` | per-pair DM ciphertext (`data/dms/<a>__<b>/`): day segments, sealed blobs, read marks, retention, `dropUser` teardown |
+| `lib/settings.js` | the site policy the admin panel flips (new rooms, guests, signups, lockdown, notice board, attachment kinds incl. voice) plus the bootstrap claim code |
 | `public/identity.js` | browser keypair, localStorage layout, backup/restore, password-wrapped envelope |
 | `public/app.js` | client state machine, API/WS clients, every view, all cryptography |
 
@@ -39,17 +41,23 @@ hash never touches a message and cannot decrypt anything.
 
 ```
 data/
-├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
-├── accounts.json                 [{username, salt, hash, scryptN, role, fx, fxAllowed, createdAt, lastLogin, keyFp, syncKey, syncOptOut}]
+├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowVoice, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
+├── accounts.json                 [{username, salt, hash, scryptN, role, fx, fxAllowed, createdAt, lastLogin, keyFp, keyPub, keyId, syncKey, syncOptOut}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
 ├── bans.json                     [{id, kind: account|fp|ip, target, room, until, mute, reason, by, at}]
 ├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles, slowMs}]
-├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/fx/file/purge…), streamed live to staff sockets and served by the admin panel
-└── rooms/
-    └── <roomId>/
-        ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
-        ├── messages/<utc-day>.jsonl   one ciphertext row per line
-        └── files/<id>.bin        one sealed attachment per file — bytes the relay cannot open
+├── social.json                   {friends: {user: [user]}, requests: [{from, to, ts}], blocked: {user: [user]}}
+├── events.log                    append-only audit trail (join/leave/key/register/login/ban/role/settings/announce/lockdown/account-op/flair/fx/file/purge…), streamed live to staff sockets and served by the admin panel. **DMs and social actions are never written here**
+├── rooms/
+│   └── <roomId>/
+│       ├── keys.json             [{fp, keyId, handle, publicKey, joinedAt, lastSeen}]
+│       ├── messages/<utc-day>.jsonl   one ciphertext row per line
+│       └── files/<id>.bin        one sealed attachment per file — bytes the relay cannot open
+└── dms/
+    └── <a>__<b>/                 one pair, sorted usernames joined by __
+        ├── messages/<utc-day>.jsonl   rows {id, seq, t, from, ct} — each ct sealed to BOTH participants
+        ├── meta.json                  {read: {user: ts}} — drives unread counts
+        └── files/<id>.bin             sealed voice notes / pictures / files
 ```
 
 `fx`/`fxAllowed` and `slowMs` are cosmetic or policy fields — they never touch keys or ciphertext.

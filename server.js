@@ -20,12 +20,14 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { WebSocketServer } = require('ws');
 
-const { FP_RE, HANDLE_RE, MSG_HEAD, now, parseCookies, serializeCookie, originAllowed, clampInt, uuid, randomHandle } = require('./lib/util');
+const { FP_RE, HANDLE_RE, USERNAME_RE, MSG_HEAD, now, parseCookies, serializeCookie, originAllowed, clampInt, uuid, randomHandle } = require('./lib/util');
 const { Settings } = require('./lib/settings');
 const { Auth, RANK } = require('./lib/auth');
 const { EFFECTS } = require('./lib/effects');
 const { Rooms, LOUNGE_ID } = require('./lib/rooms');
 const { Chat } = require('./lib/chat');
+const { Social } = require('./lib/social');
+const { DM } = require('./lib/dm');
 
 const ROOT = __dirname;
 const CONFIG_PATH = process.env.PGPCHAT_CONFIG || path.join(ROOT, 'config.json');
@@ -44,6 +46,8 @@ const settings = new Settings(DATA, CFG);
 const auth = new Auth(DATA, CFG.auth || {});
 const rooms = new Rooms(DATA, settings);
 const chat = new Chat(DATA, CFG);
+const social = new Social(DATA);
+const dm = new DM(DATA, CFG);
 const CLEANUP_MS = Math.max(1, Number(CFG.cleanupMinutes != null ? CFG.cleanupMinutes : 5)) * 60000;
 
 /* ---------- live state (never persisted) ---------- */
@@ -275,6 +279,30 @@ function kickSockets(pred, reason) {
   return n;
 }
 
+/* ---------- social plumbing ---------- */
+
+// Is any live socket signed in as this account right now.
+function isOnline(username) {
+  for (const c of wss.clients) if (c.readyState === 1 && c.__username === username) return true;
+  return false;
+}
+
+// Push a frame to every socket an account holds (all devices, all tabs).
+function sendToUser(username, obj) {
+  const payload = JSON.stringify(obj);
+  let n = 0;
+  for (const c of wss.clients) {
+    if (c.readyState !== 1 || c.__username !== username) continue;
+    try { c.send(payload); n++; } catch { /* ignore */ }
+  }
+  return n;
+}
+
+// Someone's online state moved: friends' lists carry a dot that should follow.
+function notifyFriends(username) {
+  for (const f of social.friendsOf(username)) sendToUser(f, { t: 'social' });
+}
+
 /* ---------- audit log (the website's admin log) ---------- */
 
 // Event types only an admin may read. Everything else in the log is staff-readable:
@@ -443,7 +471,7 @@ async function handleRequest(req, res) {
     return send(res, 200, {
       ok: true, rooms: rooms.all().length, messages: s.messages, keys: s.keys, online: wss ? wss.clients.size : 0,
       accounts: auth.count(), sessions: auth.sessionCount(), bans: auth.activeBans().length,
-      files: files.count, fileBytes: files.bytes,
+      files: files.count, fileBytes: files.bytes, dms: dm.stats(),
       uptime: Math.round(process.uptime()), retentionHours: chat.retentionHours,
       adminClaimable: !auth.hasAdmin(),
     });
@@ -790,8 +818,8 @@ async function handleRequest(req, res) {
         // kind is what gets checked — this is a policy control for honest clients, not a
         // content firewall (there is nothing to filter: the bytes are sealed).
         const kind = String(req.headers['x-content-kind'] || 'file').toLowerCase();
-        if (!['image', 'video', 'file'].includes(kind)) return fail(res, 400, 'unknown content kind');
-        if (!settings.allowsKind(kind)) return fail(res, 403, kind === 'file' ? 'attachments are switched off site-wide' : `${kind}s are switched off site-wide`);
+        if (!['image', 'video', 'file', 'voice'].includes(kind)) return fail(res, 400, 'unknown content kind');
+        if (!settings.allowsKind(kind)) return fail(res, 403, kind === 'file' ? 'attachments are switched off site-wide' : kind === 'voice' ? 'voice messages are switched off site-wide' : `${kind}s are switched off site-wide`);
         if (!room.allowFiles) return fail(res, 403, 'attachments are switched off in this room');
         // Refuse an oversize body before reading a single byte of it.
         const declared = Number(req.headers['content-length'] || 0);
@@ -839,6 +867,148 @@ async function handleRequest(req, res) {
       if (!FP_RE.test(fp)) return fail(res, 400, 'bad fp');
       const h = chat.history(roomId, fp, clampInt(url.searchParams.get('limit'), 1, 2000, chat.historyLimit));
       return send(res, 200, { ...h, room: roomId, retentionHours: chat.retentionHours, serverTime: now(), frozen: room.frozen });
+    }
+
+    /* ---- people: accounts, friends, blocks; direct messages (accounts only) ---- */
+
+    if (method === 'GET' && p === '/api/users') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      const q = String(url.searchParams.get('q') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24);
+      const blocked = new Set(social.blockedBy(actor.username));
+      const out = [];
+      for (const acc of auth.list()) {
+        if (acc.username === actor.username) continue;
+        if (q && !acc.username.includes(q)) continue;
+        out.push({
+          username: acc.username, role: acc.role, online: isOnline(acc.username),
+          friend: social.areFriends(actor.username, acc.username),
+          requested: !!social.requestBetween(actor.username, acc.username),
+          blocked: blocked.has(acc.username),
+        });
+        if (out.length >= 30) break;
+      }
+      return send(res, 200, { users: out });
+    }
+
+    if (p === '/api/friends') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      if (method !== 'GET') return fail(res, 405, 'not allowed');
+      const me = actor.username;
+      const friends = social.friendsOf(me).map((f) => {
+        const acc = auth.get(f) || {};
+        return {
+          username: f, role: acc.role || 'user', online: isOnline(f),
+          unread: dm.unreadFor(me, f, me), lastTs: dm.lastTs(me, f),
+        };
+      }).sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+      return send(res, 200, {
+        friends,
+        incoming: social.incoming(me).map(r => ({ username: r.from, ts: r.ts, online: isOnline(r.from) })),
+        outgoing: social.outgoing(me).map(r => ({ username: r.to, ts: r.ts, online: isOnline(r.to) })),
+        blocked: social.blockedBy(me).map(u => ({ username: u, online: isOnline(u) })),
+      });
+    }
+
+    if (method === 'POST' && p.startsWith('/api/friends/')) {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      const me = actor.username;
+      const op = p.slice('/api/friends/'.length);
+      if (!['request', 'accept', 'decline', 'remove', 'block', 'unblock'].includes(op)) return fail(res, 404, 'unknown operation');
+      const b = await readJson(req);
+      const other = String((b || {}).username || '').toLowerCase();
+      if (!USERNAME_RE.test(other) || other === me) return fail(res, 400, 'that name will not work');
+      const peer = auth.get(other);
+      if (!peer) return fail(res, 404, 'no such user');
+      const bothBlocked = social.blockedEither(me, other);
+      let r;
+      if (op === 'request') {
+        if (bothBlocked) return fail(res, 403, 'you cannot send a request to this user');
+        // If they already asked you, asking back is the same as accepting.
+        const reverse = social.requestBetween(me, other);
+        r = reverse && reverse.from === other ? social.accept(me, other) : social.request(me, other);
+      } else if (op === 'accept') {
+        if (bothBlocked) return fail(res, 403, 'you cannot add this user');
+        r = social.accept(me, other);
+      } else if (op === 'decline') {
+        // One verb for both directions: turning down an incoming request, or
+        // pulling back one you sent.
+        r = social.cancel(me, other);
+      } else if (op === 'remove') {
+        r = social.removeFriend(me, other);
+      } else if (op === 'block') {
+        r = social.block(me, other);
+      } else {
+        r = social.unblock(me, other);
+      }
+      if (r.error) return fail(res, 400, r.error);
+      // Sweep through it: either side sees lists change without a reload. Nothing
+      // about who friends whom is written to the audit log — that is their business.
+      sendToUser(me, { t: 'social' });
+      sendToUser(other, { t: 'social' });
+      return send(res, 200, { ok: true, op, username: other });
+    }
+
+    const dmFileMatch = p.match(/^\/api\/dm\/([a-z0-9_-]{2,24})\/files\/([a-z0-9]{8,32})$/);
+    if (dmFileMatch && (method === 'GET' || method === 'HEAD')) {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      const peer = auth.get(dmFileMatch[1]);
+      if (!peer || peer.username === actor.username) return fail(res, 404, 'no such user');
+      if (!dm.hasFile(actor.username, peer.username, dmFileMatch[2])) return fail(res, 404, 'that attachment is gone');
+      const full = dm.filePath(actor.username, peer.username, dmFileMatch[2]);
+      const size = fs.statSync(full).size;
+      res.writeHead(200, {
+        ...secHeaders, 'Content-Type': 'application/octet-stream', 'Content-Length': size,
+        'Cache-Control': 'no-store', 'Content-Disposition': 'attachment',
+      });
+      if (method === 'HEAD') return res.end();
+      return fs.createReadStream(full).pipe(res);
+    }
+
+    const dmFilesMatch = p.match(/^\/api\/dm\/([a-z0-9_-]{2,24})\/files$/);
+    if (dmFilesMatch && method === 'POST') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      const peer = auth.get(dmFilesMatch[1]);
+      if (!peer || peer.username === actor.username) return fail(res, 404, 'no such user');
+      if (social.blockedEither(actor.username, peer.username)) return fail(res, 403, 'this user cannot be messaged right now');
+      if (!rateOk(ip, 'files', (CFG.rate && CFG.rate.filesPerMin) || 10)) return fail(res, 429, 'slow down');
+      // Same contract as room attachments: sealed bytes, a declared kind, policy
+      // gates on the kind. The relay's copy is ciphertext either way.
+      const kind = String(req.headers['x-content-kind'] || 'file').toLowerCase();
+      if (!['image', 'video', 'file', 'voice'].includes(kind)) return fail(res, 400, 'unknown content kind');
+      if (!settings.allowsKind(kind)) return fail(res, 403, kind === 'file' ? 'attachments are switched off site-wide' : kind === 'voice' ? 'voice messages are switched off site-wide' : `${kind}s are switched off site-wide`);
+      const declared = Number(req.headers['content-length'] || 0);
+      if (declared > dm.maxFileBytes) return fail(res, 413, `that upload is over the ${Math.round(dm.maxFileBytes / 1048576)} MB cap`);
+      const body = await readBinary(req, dm.maxFileBytes);
+      if (body.error) return fail(res, 413, body.error);
+      const r = dm.addFile(actor.username, peer.username, { id: crypto.randomUUID().replace(/-/g, ''), data: body });
+      if (r.error) return fail(res, 400, r.error);
+      return send(res, 201, { ok: true, id: r.id, size: r.size });
+    }
+
+    const dmReadMatch = p.match(/^\/api\/dm\/([a-z0-9_-]{2,24})\/read$/);
+    if (dmReadMatch && method === 'POST') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      const peer = auth.get(dmReadMatch[1]);
+      if (!peer || peer.username === actor.username) return fail(res, 404, 'no such user');
+      dm.markRead(actor.username, peer.username, actor.username);
+      return send(res, 200, { ok: true });
+    }
+
+    const dmThreadMatch = p.match(/^\/api\/dm\/([a-z0-9_-]{2,24})$/);
+    if (dmThreadMatch && method === 'GET') {
+      if (actor.kind !== 'account') return fail(res, 403, 'accounts only');
+      const peer = auth.get(dmThreadMatch[1]);
+      if (!peer || peer.username === actor.username) return fail(res, 404, 'no such user');
+      if (!peer.keyPub) return fail(res, 409, 'that user has no key yet — they have to sign in once first');
+      const h = dm.history(actor.username, peer.username, clampInt(url.searchParams.get('limit'), 1, 2000, chat.historyLimit));
+      return send(res, 200, {
+        username: peer.username, role: peer.role || 'user',
+        fp: peer.keyFp || null, keyId: peer.keyId || null, publicKey: peer.keyPub,
+        online: isOnline(peer.username),
+        blocked: social.blockedEither(actor.username, peer.username),
+        friends: social.areFriends(actor.username, peer.username),
+        read: h.read, messages: h.messages,
+      });
     }
 
     /* ---- moderation ---- */
@@ -976,6 +1146,7 @@ async function handleRequest(req, res) {
           const afterMs = settings.retentionMs();
           if (afterMs !== beforeMs) {
             chat.setRetentionMs(afterMs);
+            dm.setRetentionMs(afterMs);
             const swept = sweep();
             log('retention-change', `${beforeMs}->${afterMs}`, `rows=${swept.expiredDisk}`, `files=${swept.expiredFiles}`, `mem=${swept.expiredMemory}`);
           }
@@ -1113,6 +1284,10 @@ async function handleRequest(req, res) {
             rooms.saveNow();
             const r = auth.deleteAccount(target);
             if (r.error) return fail(res, 400, r.error);
+            // A deleted account takes its conversations and its places in other
+            // people's social lists with it.
+            dm.dropUser(target);
+            social.removeUser(target);
             const sockets = kickSockets(c => c.__username === target, 'account deleted');
             for (const id of took) broadcastRoomState(id, 'the room changed hands');
             event('account-op', { op, target, by: actor.username, rooms: took.join(',') || null, sockets });
@@ -1211,7 +1386,7 @@ function registerRoomKey({ roomId, body, session, actor, res }) {
   });
   if (r.error) return fail(res, 400, r.error);
   if (session.fp !== fp) { session.fp = fp; auth.save(); }
-  if (actor.kind === 'account' && actor.username) auth.bindKey(actor.username, fp);
+  if (actor.kind === 'account' && actor.username) auth.bindKey(actor.username, fp, { keyId: String(b.keyId || '').toLowerCase(), publicKey: String(b.publicKey || '') });
   event('key', { room: roomId, handle, fp: fp.slice(0, 8), poolSize: r.poolSize, isNew: r.isNew });
   if (r.isNew) {
     broadcastRoom(roomId, { t: 'key:add', room: roomId, key: { fp, handle, publicKey: String(b.publicKey || ''), joinedAt: r.joinedAt } });
@@ -1293,6 +1468,9 @@ wss.on('connection', (ws, req) => {
       ws.__room = roomId;
       ws.__fp = fp;
       ws.__handle = handle;
+      // Was this account already reachable on another socket? Only the first
+      // connection flips the dot friends see.
+      const wasOnline = actor.kind === 'account' ? isOnline(actor.username) : true;
       ws.__username = actor.username;
       ws.__kind = actor.kind;
       ws.__role = actor.role;
@@ -1310,6 +1488,7 @@ wss.on('connection', (ws, req) => {
         muted,
         canPost: rooms.can(actor, 'post', room) && !muted,
       }));
+      if (actor.kind === 'account' && !wasOnline) notifyFriends(actor.username);
       return;
     }
 
@@ -1356,6 +1535,39 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    // A direct message: sealed by the sender to both participants' keys. The relay
+    // hands it to every socket either of them holds and keeps the ciphertext for the
+    // pair's timeline. DMs never touch the audit log — who talks to whom, and when,
+    // is not a thing the operator gets to read, only the ciphertext is stored.
+    if (m.t === 'dm') {
+      if (!ws.__username || ws.__kind !== 'account') { ws.send(JSON.stringify({ t: 'err', msg: 'accounts only' })); return; }
+      const to = String(m.to || '').toLowerCase();
+      if (to === ws.__username) return;
+      const peer = auth.get(to);
+      if (!peer) { ws.send(JSON.stringify({ t: 'err', msg: 'no such user' })); return; }
+      if (!peer.keyPub) { ws.send(JSON.stringify({ t: 'err', msg: 'that user has no key yet — they have to sign in once first' })); return; }
+      if (social.blockedEither(ws.__username, to)) { ws.send(JSON.stringify({ t: 'err', msg: 'this user cannot be messaged right now' })); return; }
+      if (!rateOk(ip, 'msgs', (CFG.rate && CFG.rate.msgsPerMin) || 25)) { ws.send(JSON.stringify({ t: 'err', msg: 'rate limit — slow down' })); return; }
+      const ct = String(m.ct || '');
+      if (!ct.startsWith(MSG_HEAD) || !ct.includes('END PGP MESSAGE') || ct.length > chat.maxMsgBytes) {
+        ws.send(JSON.stringify({ t: 'err', msg: 'bad ciphertext' })); return;
+      }
+      const r = dm.add(ws.__username, to, { from: ws.__username, ct });
+      if (r.error) { ws.send(JSON.stringify({ t: 'err', msg: r.error })); return; }
+      const base = { id: r.message.id, seq: r.message.seq, t: r.message.t, from: ws.__username, to, ct };
+      for (const c of wss.clients) {
+        if (c.readyState !== 1 || c.__kind !== 'account') continue;
+        if (c.__username === to) {
+          try { c.send(JSON.stringify({ t: 'dm', m: base })); } catch { /* ignore */ }
+        } else if (c.__username === ws.__username) {
+          // The sending socket gets its tmpId back so the optimistic bubble can be
+          // replaced in place; the sender's other tabs just see the message.
+          try { c.send(JSON.stringify({ t: 'dm', m: base, tmpId: c === ws ? (m.tmpId || null) : null })); } catch { /* ignore */ }
+        }
+      }
+      return;
+    }
+
     // room switch without dropping the socket
     if (m.t === 'switch') {
       const roomId = String(m.room || '').toLowerCase();
@@ -1380,7 +1592,13 @@ wss.on('connection', (ws, req) => {
     if (m.t === 'ping') { ws.send(JSON.stringify({ t: 'pong' })); return; }
   });
 
-  ws.on('close', () => { clearTimeout(helloTimer); leavePresence(ws); });
+  ws.on('close', () => {
+    clearTimeout(helloTimer);
+    leavePresence(ws);
+    // Last socket for this account closed → friends' dots go offline.
+    const u = ws.__username;
+    if (u && !isOnline(u)) notifyFriends(u);
+  });
   ws.on('error', () => { /* ignore */ });
 });
 
@@ -1401,13 +1619,16 @@ function load() {
   fs.mkdirSync(path.join(DATA, 'rooms'), { recursive: true });
   const s = settings.load();
   const a = auth.load();
+  social.load();
   const r = rooms.load();
   const migrated = chat.migrateLegacy(LOUNGE_ID);
   if (fs.existsSync(LEGACY_MSG_FILE)) { try { fs.renameSync(LEGACY_MSG_FILE, `${LEGACY_MSG_FILE}.migrated`); } catch { /* leave it */ } }
   const c = chat.load(rooms.all().map(x => x.id));
+  const d = dm.load();
   // How long ciphertext lives is policy (settings.json), not a constant: config.json is
   // only the fallback for a relay where nobody has touched the panel yet.
   chat.setRetentionMs(settings.retentionMs());
+  dm.setRetentionMs(settings.retentionMs());
   for (const room of rooms.all()) {
     fs.mkdirSync(chat.msgDir(room.id), { recursive: true });
     fs.mkdirSync(chat.filesDir(room.id), { recursive: true });
@@ -1425,8 +1646,8 @@ function load() {
   log('loaded',
     `rooms=${r.rooms}`, `accounts=${a.accounts}`, `sessions=${a.sessions}`, `bans=${a.bans}`,
     `keys=${c ? Object.values(c).reduce((n, x) => n + x.keys, 0) : 0}`, `ttl=${chat.retentionHours == null ? 'forever' : `${chat.retentionHours}h`}`,
-    `migrated=${migrated.join('+') || 'none'}`, `guestAccess=${s.guestAccess}`, `admin=${auth.hasAdmin()}`,
-    `uploads=${['images', 'video', 'files'].filter(k => settings.filePolicy()[k === 'images' ? 'images' : k]).join(',') || 'off'}`);
+    `migrated=${migrated.join('+') || 'none'}`, `guestAccess=${s.guestAccess}`, `admin=${auth.hasAdmin()}`, `dms=${d.pairs}`,
+    `uploads=${Object.entries(settings.filePolicy()).filter(([, v]) => v).map(([k]) => k).join(',') || 'off'}`);
 }
 
 function shutdown(sig) {
@@ -1451,10 +1672,16 @@ setInterval(() => {
 
 function sweep() {
   const r = chat.cleanup();
-  if (r.expiredDisk || r.expiredMemory || r.expiredFiles) {
-    log('retention-sweep', `expired_disk=${r.expiredDisk}`, `expired_memory=${r.expiredMemory}`, `expired_files=${r.expiredFiles}`);
+  const d = dm.cleanup();
+  const total = {
+    expiredDisk: r.expiredDisk + d.expiredDisk,
+    expiredMemory: r.expiredMemory + d.expiredMemory,
+    expiredFiles: r.expiredFiles + d.expiredFiles,
+  };
+  if (total.expiredDisk || total.expiredMemory || total.expiredFiles) {
+    log('retention-sweep', `expired_disk=${total.expiredDisk}`, `expired_memory=${total.expiredMemory}`, `expired_files=${total.expiredFiles}`);
   }
-  return r;
+  return total;
 }
 
 server.listen(CFG.port || 8788, CFG.bind || '127.0.0.1', () => {

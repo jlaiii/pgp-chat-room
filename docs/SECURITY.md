@@ -26,21 +26,29 @@ change from the single-room build, and it is worth being precise about:
 | message metadata (id, seq, time, room, author handle + fingerprint, recipient fingerprints) | delivery and history | a social graph and timing pattern |
 | sync envelope (optional) | multi-device | an AES-GCM blob; useless without the password |
 | attachment blobs (ciphertext, with size and timestamp) | file transfer through a relay that cannot read it | how many bytes were sent, when, and by whom — never what they are |
+| DM rows and blobs: which pair, times, sizes, read marks | one-to-one messaging | nothing readable — each row and blob is sealed to both participants; **DMs are never entered in the audit log** |
+| friend requests, friendships, blocks | the social list | who talks to whom exists as a graph in `social.json`; declining and blocking are silent by design |
 
 None of that reveals a single message body.
 
-## Attachments
+**Direct messages** are the room contract with the pool replaced by exactly two keys: the sender
+seals each row to the recipient **and to itself**, so both sides of the thread can read everything
+and the process can read nothing. Read marks are server-side timestamps, not content. Blocks are
+one-way and unannounced: the blocked side simply gets `this user cannot be messaged right now`.
 
-A file is encrypted in the browser with a one-off AES-256-GCM key and uploaded as opaque bytes;
-that key is put inside the same OpenPGP message as the caption, addressed to the room's pool. The
-relay therefore stores a blob it cannot open, serves it back to anyone who may read the room, and
-never learns the filename (it travels inside the envelope too).
+## Attachments and voice notes
+
+A file — or a recorded voice note — is encrypted in the browser with a one-off AES-256-GCM key and
+uploaded as opaque bytes; that key is put inside the same OpenPGP message as the caption, addressed
+to the room's pool (or, in a DM, to the two participants). The relay therefore stores a blob it
+cannot open **and cannot listen to**, serves it back to whoever may read the conversation, and never
+learns the filename (it travels inside the envelope too).
 
 Two things to be honest about:
 
-- **The content switches are policy, not a filter.** The sender declares `image` / `video` / `file`
-  in a header, because the relay cannot inspect sealed bytes. An adversarial client can mislabel
-  what it uploads; what it cannot do is get the relay to store anything readable.
+- **The content switches are policy, not a filter.** The sender declares `image` / `video` / `file` /
+  `voice` in a header, because the relay cannot inspect sealed bytes. An adversarial client can
+  mislabel what it uploads; what it cannot do is get the relay to store anything readable.
 - **An attachment expires with the window.** Retention shreds the rows and the blobs together, so a
   message can outlive the bytes it points at. The UI says "this attachment is gone" in that case —
   which is the feature working, not a bug.

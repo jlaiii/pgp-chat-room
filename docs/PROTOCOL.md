@@ -48,6 +48,18 @@ effect — a rendering hint, never a permission.
 Legacy single-room endpoints `/api/keys`, `/api/pool` and `/api/history` still work and resolve to
 the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 
+## People and direct messages (accounts only; guests get 403)
+
+| method | path | notes |
+|---|---|---|
+| GET | `/api/users` | `?q=` username search (30 rows) with `online`, `friend`, `requested`, `blocked` flags |
+| GET | `/api/friends` | `{friends: [{username, role, online, unread, lastTs}], incoming, outgoing, blocked}` — the one call the Friends sheet paints from |
+| POST | `/api/friends/request\|accept\|decline\|remove\|block\|unblock` | `{username}`. `request` auto-accepts if they already asked you; `decline` also cancels an outgoing request; `block` ends the friendship, kills pending requests both ways and silences DMs until `unblock`. Both sides get a `{"t":"social"}` nudge |
+| GET | `/api/dm/<username>` | `{username, role, fp, keyId, publicKey, online, blocked, friends, read, messages}` — `publicKey` is what the client seals to; 409 if that account has no key bound yet |
+| POST | `/api/dm/<username>/read` | stamps the caller's read mark (drives unread counts) |
+| POST | `/api/dm/<username>/files` | raw sealed body + `X-Content-Kind: image\|video\|file\|voice`, same gates as rooms minus the room switch. 201 `{id,size}` |
+| GET | `/api/dm/<username>/files/<fileId>` | the sealed blob back, for either participant |
+
 ## Moderation and admin
 
 | method | path | notes |
@@ -56,7 +68,7 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 | POST | `/api/mod/unban` | `{id}` or `{kind, target, room}` |
 | GET | `/api/mod/bans` | active bans (mod+) |
 | GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts (rows, keys, attachments, bytes), a 7-day activity series, live sessions (staff; mods get the same read with the session list empty) |
-| PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?, allowImages?, allowVideo?, allowFiles?, keySyncDefault?, retentionHours?: number\|null, keepForever?}` (admin). Changing the window sweeps the relay immediately |
+| PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?, allowImages?, allowVideo?, allowFiles?, allowVoice?, keySyncDefault?, retentionHours?: number\|null, keepForever?}` (admin). Changing the window sweeps the relay immediately |
 | POST | `/api/admin/role` | `{username, role}` — cannot change your own role (admin) |
 | GET | `/api/admin/sessions` | every live session with a 12-char hashed id; the raw token is never returned (admin) |
 | POST | `/api/admin/sessions` | `{id}` revokes that one session and drops its socket (admin) |
@@ -81,6 +93,7 @@ Client → server:
 ```jsonc
 {"t":"hello","room":"lounge","fp":"<40 or 64 hex>","handle":"quiet-heron-11"}
 {"t":"send","room":"lounge","tmpId":"t1727…","ct":"-----BEGIN PGP MESSAGE-----…","recipients":["<fp>", "…"]}
+{"t":"dm","to":"pam","tmpId":"d1727…","ct":"-----BEGIN PGP MESSAGE-----…"}   // accounts only: ct is sealed to both participants
 {"t":"switch","room":"other-room"}      // move this socket to another room
 {"t":"ping"}
 ```
@@ -102,6 +115,9 @@ Server → client:
 {"t":"evt","e":{"t":1790…,"type":"join","room":"lounge",…}}  // staff only: the live admin log
 {"t":"fx","username":"jay","fx":"glitch"}                         // a name effect changed (null clears)
 {"t":"settings","settings":{…}}                              // policy changed; clients follow live
+{"t":"dm","m":{"id","seq","t","from","to","ct"}}             // a DM arrived (recipient view)
+{"t":"dm","m":{"…"},"tmpId":"d1727…"}                        // echo to the sender's socket (its other tabs get tmpId: null)
+{"t":"social"}                                               // friends/requests/blocks changed on either side; refetch /api/friends
 {"t":"pong"}
 ```
 
@@ -117,8 +133,13 @@ guest sessions, 240 API calls. Ciphertext is capped at `maxMsgBytes` (128 KB def
   only; the client attempts decryption and treats failure as "sealed to an older key". Gating on a
   recipient list the server does not send would make every received message look sealed.
 - **Attachments ride inside the message.** The `ct` of a message that has a file decrypts to
-  `{"text": "...", "file": {"id","key","iv","name","type","size","kind"}}` — the AES-GCM key is
+  `{"text": "...", "file": {"id","key","iv","name","type","size","kind","dur"?}}` — the AES-GCM key is
   inside the OpenPGP envelope, so the relay can serve the blob without ever being able to open it.
+  `kind` is `image | video | file | voice`; `dur` (seconds) is only meaningful for voice notes.
+- **DMs are the same contract, pair-scoped.** Rows live at `data/dms/<a>__<b>/` (sorted names,
+  `__`-joined); each `ct` is sealed by the sender to the recipient's key **and its own**, so both
+  sides read every row and the relay can read none. `tmpId` rides at the **frame level** for `dm`
+  (not inside `m`), unlike `msg` frames. Nothing about DMs reaches the audit log.
 - **`blob:` URLs need the CSP to allow them.** `img-src`/`media-src` must include `blob:`, or
   decrypted pictures and video render as a broken image even though the bytes arrived.
 - **Deleting keeps a tombstone row** (`{…, ct: null, deleted: true, deletedBy, deletedAt}`) and
