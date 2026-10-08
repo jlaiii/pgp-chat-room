@@ -20,9 +20,9 @@ does not match `Host` is rejected with 403 before it is routed.
 | POST | `/api/guest` | `{handle?, fp?}` | 201 + guest session; 403 when guest access is off |
 | GET | `/api/me` | — | `{me, settings, claimable, retentionHours, flair, rooms[]}` |
 | POST | `/api/me/flair` | `{rainbow}` | admin only: the cosmetic rainbow name, own account only |
-| GET/PUT/DELETE | `/api/sync-key` | `{enabled, blob}` | accounts only; the blob is an opaque sealed envelope |
+| GET/PUT/DELETE | `/api/sync-key` | `{enabled, blob}` | accounts only; the blob is an opaque sealed envelope. DELETE is an explicit opt-out (`syncOptOut`), so sign-in does not auto re-upload |
 
-`me` carries `{kind, username, handle, role, keyFp, syncKey, rainbow, createdAt}`. `flair` is the
+`me` carries `{kind, username, handle, role, keyFp, syncKey, syncOptOut, rainbow, createdAt}`. `flair` is the
 map of which handles render with the animated name — a rendering hint, never a permission.
 
 ## Rooms

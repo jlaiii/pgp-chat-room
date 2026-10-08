@@ -136,6 +136,7 @@ function meView(session) {
     kind: a.kind, username: a.username, handle: a.handle, role: a.role,
     keyFp: a.kind === 'account' ? (auth.get(a.username) || {}).keyFp || null : a.fp,
     syncKey: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncKey : false,
+    syncOptOut: a.kind === 'account' ? !!(auth.get(a.username) || {}).syncOptOut : false,
     rainbow: a.kind === 'account' ? !!(auth.get(a.username) || {}).rainbow : false,
     createdAt: session.createdAt,
   };
@@ -597,9 +598,12 @@ async function handleRequest(req, res) {
         const r = auth.setSyncKey(actor.username, b.enabled !== false, b.blob);
         if (r.error) return fail(res, 400, r.error);
         event('sync-key', { username: actor.username, enabled: !!b.enabled });
-        return send(res, 200, { ok: true, syncKey: r.syncKey });
+        return send(res, 200, { ok: true, syncKey: r.syncKey, syncOptOut: r.syncOptOut });
       }
-      if (method === 'DELETE') { auth.setSyncKey(actor.username, false); return send(res, 200, { ok: true, syncKey: { enabled: false } }); }
+      if (method === 'DELETE') {
+        const r = auth.setSyncKey(actor.username, false);
+        return send(res, 200, { ok: true, syncKey: { enabled: false }, syncOptOut: r.syncOptOut });
+      }
     }
 
     // -- rooms --

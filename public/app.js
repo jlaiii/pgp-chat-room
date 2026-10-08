@@ -328,13 +328,13 @@
     });
     if (!creds || !creds.password) return;
     try {
-      const { syncKey } = await api('/api/sync-key');
-      if (!syncKey.enabled) return;
-      const armored = await Identity.unwrap(creds.password, syncKey.blob);
-      state.id = await Identity.adoptPrivate(armored, state.me.handle);
-      toast('Key unlocked on this device');
+      const r = await restoreAccountKey(creds.password);
+      if (r.ok) toast(r.same ? 'This device already holds your account key' : 'Key unlocked on this device');
+      else if (r.reason === 'unwrap-failed') toast('Wrong password for that key', 4200);
+      else if (r.reason === 'no-envelope') toast('This account has no synced key any more');
+      else toast(`Could not unlock: ${r.reason}`, 4200);
     } catch (e) {
-      toast(e.name === 'OperationError' ? 'Wrong password for that key' : `Could not unlock: ${e.message}`, 4200);
+      toast(`Could not unlock: ${e.message}`, 4200);
     }
   }
 
@@ -503,6 +503,12 @@
       method: 'POST',
       body: { room: state.room.id, fp: id.fp, keyId: id.keyId, handle, publicKey: id.armoredPublic },
     });
+    // An account's key is stuck to its account: the tag keeps it from ever being
+    // claimed by a different account registering on this shared device later.
+    if (state.me.kind === 'account') Identity.save({ owner: state.me.username });
+    // The pool was fetched before this key joined it: keep the local copy honest, or
+    // the first message sent this session would be sealed to everyone but its author.
+    await addPoolKey({ fp: id.fp, handle, publicKey: id.armoredPublic, joinedAt: res.joinedAt || Date.now() });
     if (res.isNew) banner('You are in as ' + handle + '. Your key is new to this room, so messages sent before you joined stay sealed to older keys. Download a backup so you do not lose this device’s history.', 'info');
     return res;
   }
@@ -511,6 +517,9 @@
 
   async function encryptFor(text) {
     const recipients = state.poolKeys.size ? [...state.poolKeys.values()] : [state.id.publicKeyObj];
+    // Always address the author too, whatever the pool looks like locally: nobody
+    // should have to treat their own message as "sealed to an older key".
+    if (!state.poolKeys.has(state.id.fp)) recipients.push(state.id.publicKeyObj);
     const ct = await openpgp.encrypt({
       message: await openpgp.createMessage({ text }),
       encryptionKeys: recipients,
@@ -1098,21 +1107,70 @@
 
   /* ---------------- account sheet ---------------- */
 
-  // Key sync is on by default: after signing in or registering, wrap this device's key
-  // with the password that is already in hand — unless the account already has an
-  // envelope, which must never be overwritten (that would throw away the key it holds).
-  async function maybeSyncKey(password) {
+  /* ---------------- the account's key <-> this device ----------------
+   * The key belongs to the account: it is made when the account is made (or claimed
+   * from the device the account is made on), saved to the account as a password-
+   * wrapped envelope, and restored onto every device that signs in. The relay only
+   * ever holds that sealed envelope.
+   */
+
+  // Save this device's key to the account. Loud at registration (sync is part of the
+  // promise made there), quiet as a self-heal at sign-in when the account holds none.
+  // The failure is returned, not swallowed: "saved to your account" must not be a lie.
+  async function syncKeyUp(password, { loud = false } = {}) {
+    if (!password || !state.me || state.me.kind !== 'account') return { ok: false, reason: 'not-account' };
+    if (state.me.syncKey) return { ok: true, already: true };
+    if (state.me.syncOptOut) return { ok: false, reason: 'opted-out' };
+    if ((state.settings || {}).keySyncDefault === false) return { ok: false, reason: 'site-off' };
+    if (!state.id || !state.id.armoredPrivate) return { ok: false, reason: 'no-key' };
     try {
-      if (!password || !state.me || state.me.kind !== 'account') return;
-      if (state.me.syncKey) return;
-      if ((state.settings || {}).keySyncDefault === false) return;
-      if (!state.id || !state.id.armoredPrivate) return;
       const blob = await Identity.wrap(password, state.id.armoredPrivate);
       await api('/api/sync-key', { method: 'PUT', body: { enabled: true, blob } });
+      Identity.save({ owner: state.me.username });
       await loadMe();
       renderMe();
-      toast('Key synced to your account — a new device can unlock it with your password. Keep a backup file too.', 5600);
-    } catch { /* the account still works; the backup file is the real recovery path */ }
+      if (loud) toast('Key saved to your account — any device can unlock it with your password. Keep a backup file too.', 5600);
+      return { ok: true };
+    } catch (e) {
+      // The account still works; the envelope is a second copy, not the only one.
+      if (loud) toast('Your key could not be saved to your account — turn key sync on from Account settings to retry.', 7000);
+      return { ok: false, reason: 'failed', error: e };
+    }
+  }
+
+  // Sign-in: if the account holds an envelope, this device switches to the key inside
+  // it — one account, one key, every device. The envelope is never overwritten, and a
+  // local key is replaced only after the envelope opened with the password in hand.
+  async function restoreAccountKey(password) {
+    if (!state.me || state.me.kind !== 'account') return { ok: false, reason: 'not-account' };
+    let syncKey;
+    try { ({ syncKey } = await api('/api/sync-key')); } catch { return { ok: false, reason: 'fetch-failed' }; }
+    if (!syncKey || !syncKey.enabled) return { ok: false, reason: 'no-envelope' };
+    let armored;
+    try { armored = await Identity.unwrap(password, syncKey.blob); }
+    catch { return { ok: false, reason: 'unwrap-failed' }; }
+    const fp = await Identity.fpOf(armored);
+    const cur = Identity.raw();
+    if (cur && cur.fp === fp) {
+      Identity.save({ owner: state.me.username });
+      return { ok: true, same: true };
+    }
+    state.id = await Identity.adoptPrivate(armored, state.me.username, state.me.username);
+    return { ok: true, same: false };
+  }
+
+  // Registration: the key is made with the account. A device key that never belonged
+  // to an account is claimed (continuity); one that belonged to a different account
+  // must not follow this one. A key made for the account carries its name.
+  async function ensureAccountKey(username) {
+    const cur = Identity.raw();
+    if (!cur || (cur.owner && cur.owner !== username)) {
+      state.id = await Identity.create(username, username);
+    } else {
+      state.id = await Identity.ensure();
+      Identity.save({ owner: username });
+    }
+    return state.id;
   }
 
   async function changePassword() {
@@ -1138,7 +1196,7 @@
         await api('/api/sync-key', { method: 'DELETE' });
         await loadMe();
         renderMe();
-        toast('Key sync is off — the stored envelope was deleted');
+        toast('Key sync is off — the envelope was deleted, and it stays off until you turn it back on.', 5200);
       } catch (e) { toast(e.message); }
       return;
     }
@@ -2024,8 +2082,14 @@
         await api('/api/auth/login', { method: 'POST', body: { username, password } });
         $('loginPass').value = '';
         $('authNote').textContent = '';
+        await loadMe();
+        // The account's key first: it is what this device registers in the room, reads
+        // history with and signs with. The password is still in hand from the sign-in.
+        const restored = await restoreAccountKey(password).catch(() => ({ ok: false, reason: 'failed' }));
+        if (restored.ok && !restored.same) toast('Your account key is now on this device', 4600);
+        else if (!restored.ok && restored.reason === 'unwrap-failed') toast('The synced key did not unlock with that password — this device keeps its own key', 6000);
+        await syncKeyUp(password);   // an account with no envelope gets this device's key saved to it
         await afterAuth();
-        await maybeSyncKey(password);
       } catch (e) {
         $('authNote').textContent = e.body && e.body.banned ? e.message : 'Wrong username or password.';
         if (!$('appScreen').hidden) toast(`Sign-in failed: ${e.message}`, 5000);
@@ -2037,8 +2101,12 @@
       try {
         await api('/api/auth/register', { method: 'POST', body: { username, password } });
         $('regPass').value = '';
+        await loadMe();
+        // The way it is meant to be: the key is made when the account is made, saved
+        // to the account while the password is in hand, and only then goes to a room.
+        await ensureAccountKey(username);
+        await syncKeyUp(password, { loud: true });
         await afterAuth();
-        await maybeSyncKey(password);
         if (state.claimable) { toast('Account created. Claim the admin seat with your one-time code.', 5200); openSheet($('claimSheet')); }
       } catch (e) {
         $('authNote').textContent = e.message;
@@ -2111,7 +2179,7 @@
       if (!f) return;
       try {
         const armored = await f.text();
-        state.id = await Identity.adoptPrivate(armored, state.me.kind === 'guest' ? state.me.handle : state.me.username);
+        state.id = await Identity.adoptPrivate(armored, state.me.kind === 'guest' ? state.me.handle : state.me.username, state.me.kind === 'account' ? state.me.username : undefined);
         await registerKey();
         await loadHistory();
         await openKeySheet();

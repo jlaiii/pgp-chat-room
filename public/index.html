@@ -159,10 +159,10 @@
     <input type="checkbox" id="syncToggle">
     <span class="toggle-text">
       <span class="toggle-label">Sync this key to my account</span>
-      <span class="hint">Lets a new device unlock your key with your password. Stored as an envelope this server cannot open.</span>
+      <span class="hint">On by default: your key is saved to the account — an envelope this server cannot open — and restored when you sign in on another device. Turn it off to keep the key on this device only.</span>
     </span>
   </label>
-  <p class="note">Your private key is made in this browser and never leaves it in the clear. Lose this device and the backup file and your messages are gone for good — that is the point of end-to-end.</p>
+  <p class="note">Your private key is made in this browser and never leaves it in the clear. Sync stores a sealed copy on your account so your password can bring the key to a new device; the backup file is the copy nothing else can take away.</p>
 </section>
 
 <section class="sheet" id="accountSheet" hidden aria-label="Account">
@@ -269,7 +269,7 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="/vendor/openpgp.min.js?v=1"></script>
-<script src="/identity.js?v=2"></script>
-<script src="/app.js?v=14"></script>
+<script src="/identity.js?v=3"></script>
+<script src="/app.js?v=15"></script>
 </body>
 </html>

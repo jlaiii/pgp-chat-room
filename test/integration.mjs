@@ -826,6 +826,44 @@ test('PGP Room relay — end to end', async t => {
     assert.equal((await admin('POST', '/api/admin/sessions', JSON.stringify({ id: 'deadbeef0000' }))).status, 404);
   });
 
+  await t.test('key sync: the envelope is owner-only, and turning it off sticks', async () => {
+    const c = makeClient();
+    await c('POST', '/api/auth/register', JSON.stringify({ username: 'syncfan', password: 'sync-me-please-1' }));
+    let me = await c('GET', '/api/me');
+    assert.equal(me.body.me.syncKey, false, 'a fresh account starts with no envelope');
+    assert.equal(me.body.me.syncOptOut, false);
+    assert.equal((await c('GET', '/api/sync-key')).body.syncKey.enabled, false);
+
+    const blob = 'A'.repeat(64);
+    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob }))).status, 200);
+    const got = await c('GET', '/api/sync-key');
+    assert.equal(got.body.syncKey.enabled, true);
+    assert.equal(got.body.syncKey.blob, blob, 'the envelope round-trips to its owner');
+    me = await c('GET', '/api/me');
+    assert.equal(me.body.me.syncKey, true);
+    assert.equal((await c('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob: 'short' }))).status, 400, 'a junk blob is refused');
+
+    const g = makeClient();
+    await g('POST', '/api/guest', JSON.stringify({ handle: 'g-sync-1' }));
+    assert.equal((await g('GET', '/api/sync-key')).status, 403, 'guests have no account mailbox');
+    assert.equal((await g('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob }))).status, 403);
+
+    // Off is a choice: it survives the next sign-in instead of being quietly undone.
+    assert.equal((await c('DELETE', '/api/sync-key')).status, 200);
+    me = await c('GET', '/api/me');
+    assert.equal(me.body.me.syncKey, false);
+    assert.equal(me.body.me.syncOptOut, true);
+    const again = makeClient();
+    await again('POST', '/api/auth/login', JSON.stringify({ username: 'syncfan', password: 'sync-me-please-1' }));
+    assert.equal((await again('GET', '/api/me')).body.me.syncOptOut, true, 'the opt-out is remembered across a sign-in');
+
+    // Turning it back on clears the flag.
+    assert.equal((await again('PUT', '/api/sync-key', JSON.stringify({ enabled: true, blob }))).status, 200);
+    me = await again('GET', '/api/me');
+    assert.equal(me.body.me.syncKey, true);
+    assert.equal(me.body.me.syncOptOut, false);
+  });
+
   await t.test('the message lifetime is policy the admin can change at any time', async () => {
     assert.equal((await api('/healthz')).body.retentionHours, 48, 'the window starts at config.json');
     const one = await admin('PATCH', '/api/admin/settings', JSON.stringify({ retentionHours: 1, keepForever: false }));

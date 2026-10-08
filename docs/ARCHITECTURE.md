@@ -40,7 +40,7 @@ hash never touches a message and cannot decrypt anything.
 ```
 data/
 ├── settings.json                 {allowNewRooms, guestAccess, allowRegistration, lockdown, motd, allowImages, allowVideo, allowFiles, allowMsgDelete, allowMsgEdit, retentionHours, keepForever, keySyncDefault, adminClaim, createdAt}
-├── accounts.json                 [{username, salt, hash, scryptN, role, rainbow, createdAt, lastLogin, keyFp, syncKey}]
+├── accounts.json                 [{username, salt, hash, scryptN, role, rainbow, createdAt, lastLogin, keyFp, syncKey, syncOptOut}]
 ├── sessions.json                 [{token, kind, username|handle, role, fp, ip, createdAt, lastSeen, expiresAt}]
 ├── bans.json                     [{id, kind: account|fp|ip, target, room, until, mute, reason, by, at}]
 ├── rooms.json                    [{id, name, about, private, frozen, guestOk, builtin, owner, members[], mods[], pending[], guestMembers[], allowFiles, slowMs}]

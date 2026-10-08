@@ -1,13 +1,18 @@
 /* PGP Room — identity.
  *
  * The private key is generated in this browser and lives in localStorage. It is
- * never sent to the server in the clear. The only thing that may ever leave this
+ * never sent to the server in the clear. The only thing that ever leaves this
  * device is an *envelope*: the armored private key encrypted with a key derived
  * from the account password (PBKDF2 -> AES-GCM), which the server stores as an
- * opaque string it holds no way to open.
+ * opaque string it holds no way to open. That envelope is the account's copy of
+ * the key: it is saved when the account is made and restored onto every device
+ * that signs in.
  *
- * Storage format is unchanged from the first release ('pgpchat.identity.v1'), so
- * keys that are already registered in a room keep working.
+ * A record can carry `owner` — the account username this device's key belongs
+ * to. Guest keys have none, so a key can never drift into the wrong account.
+ *
+ * Storage format stays 'pgpchat.identity.v1' from the first release, so keys
+ * that are already registered in a room keep working.
  */
 const Identity = (() => {
   const LS = 'pgpchat.identity.v1';
@@ -45,7 +50,7 @@ const Identity = (() => {
     }
   }
 
-  async function create(handle) {
+  async function create(handle, owner) {
     const name = handle || randomHandle();
     const gen = await openpgp.generateKey({
       type: 'curve25519',
@@ -56,6 +61,7 @@ const Identity = (() => {
     const id = {
       handle: name, armoredPrivate: gen.privateKey, armoredPublic: gen.publicKey,
       fp: privateKey.getFingerprint().toLowerCase(), keyId: privateKey.getKeyID().toHex().toLowerCase(),
+      owner: owner || null,
       createdAt: Date.now(),
     };
     localStorage.setItem(LS, JSON.stringify(id));
@@ -70,17 +76,24 @@ const Identity = (() => {
     localStorage.setItem(LS, JSON.stringify({ ...cur, ...patch }));
   }
 
-  async function adoptPrivate(armoredPrivate, handle) {
+  async function adoptPrivate(armoredPrivate, handle, owner) {
     const privateKey = await openpgp.readPrivateKey({ armoredKey: armoredPrivate });
     const armoredPublic = privateKey.toPublic().armor();
     const id = {
       handle: handle || raw()?.handle || randomHandle(),
       armoredPrivate, armoredPublic,
       fp: privateKey.getFingerprint().toLowerCase(), keyId: privateKey.getKeyID().toHex().toLowerCase(),
+      owner: owner === undefined ? (raw()?.owner ?? null) : (owner || null),
       createdAt: Date.now(),
     };
     localStorage.setItem(LS, JSON.stringify(id));
     return { ...id, privateKey, publicKeyObj: await openpgp.readKey({ armoredKey: armoredPublic }) };
+  }
+
+  // The fingerprint of an armored private key, without adopting it anywhere.
+  async function fpOf(armoredPrivate) {
+    const privateKey = await openpgp.readPrivateKey({ armoredKey: armoredPrivate });
+    return privateKey.getFingerprint().toLowerCase();
   }
 
   function backup(id) {
@@ -132,5 +145,5 @@ const Identity = (() => {
     return v;
   }
 
-  return { LS, LS_PREFS, has, raw, load, ensure, create, save, backup, clear, adoptPrivate, wrap, unwrap, prefs, pref, b64, unb64 };
+  return { LS, LS_PREFS, has, raw, load, ensure, create, save, backup, clear, adoptPrivate, fpOf, wrap, unwrap, prefs, pref, b64, unb64 };
 })();

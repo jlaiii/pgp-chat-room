@@ -65,11 +65,13 @@ says a message was deleted, and the metadata was already in the retention window
 - Changing a password invalidates that account's other sessions and re-wraps the synced envelope.
 - **Key sync is on by default and deliberately weak-by-design-dangerous:** the private key is encrypted in
   the browser with PBKDF2(SHA-256, 250 000 rounds) → AES-256-GCM, and the server stores the
-  envelope. The client wraps it at sign-in or registration with the password you just typed — it never
-  overwrites an existing envelope, and the switch in *Account* turns it off. The server never receives
-  the password, so it cannot open the envelope — but a weak password can
-  be attacked offline against a stolen envelope. The UI says so, and prompts to keep a backup file
-  as well. Password sync is a convenience layer; the backup file is the real recovery path.
+  envelope. The key is saved to the account at registration (or claimed from the device that registers),
+  restored from the envelope at sign-in with the password you just typed, and never overwrites an
+  existing envelope. Switching it off in *Account* is remembered (`syncOptOut`), so a later sign-in
+  does not quietly re-upload. The server never receives the password, so it cannot open the
+  envelope — but a weak password can be attacked offline against a stolen envelope. The UI says so,
+  and prompts to keep a backup file as well. Password sync is a convenience layer; the backup file
+  is the real recovery path.
 
 ## Authorization
 

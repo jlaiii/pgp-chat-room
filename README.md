@@ -64,10 +64,12 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   animated colour sweep: each letter carries its own hue and its own phase, so the fade travels
   left to right. It is a rendering hint only — no key, no ciphertext, no permission — and it is
   dropped the moment the account is demoted.
-- **Handles and keys.** Each browser makes its own Curve25519 keypair on first visit. Rename a
-  guest handle, download or restore a key backup, and optionally **sync your key**: the private
-  key is wrapped in the browser with a key derived from your password (PBKDF2 250k → AES-GCM)
-  and the server stores only that sealed envelope.
+- **Handles and keys.** Each browser makes its own Curve25519 keypair on first visit, and **an
+  account makes its key when it is made**: registering generates the key (or claims this device's
+  pre-account key) and saves it to the account as a sealed envelope — wrapped in the browser with a
+  key derived from your password (PBKDF2 250k → AES-GCM); the server only ever holds that opaque
+  string. Signing in on another device restores the account's key there: one account, one key.
+  Guest handles, rename, and key backup/restore work as before.
 - **Self-destructing.** Ciphertext is shredded after the retention window (48h by default) —
   overwritten twice, fsynced, unlinked — and expired bubbles are pruned in open tabs too.
 
@@ -144,11 +146,12 @@ it. Two honest caveats: the kind (image / video / file) is **declared by the sen
 the relay has no way to inspect sealed bytes — the switches are policy, not a content filter; and an
 attachment dies with the retention window, so an old message can point at bytes that are already gone.
 
-**Key sync is on by default.** When you sign in or register, the browser wraps this device's key with
-the password you just typed and stores the sealed envelope on your account, so a new device can unlock
-your history. It never overwrites an existing envelope, it can be switched off in *Account*, and the
-honest caveat is unchanged: a weak password can be attacked offline against a stolen envelope, so keep
-a backup file.
+**Key sync is on by default, and it is the account's key that syncs.** Registering saves the key to
+the account as a sealed envelope; signing in restores it onto the device, so the same key reads your
+history everywhere. The envelope is never overwritten, an account that holds no envelope gets the
+device's key saved up as a self-heal, and switching sync off in *Account* keeps it off — devices then
+start with their own key. The honest caveat is unchanged: a weak password can be attacked offline
+against a stolen envelope, so keep a backup file.
 
 **Lockdown** is the panic switch: freeze every room, stop new rooms, close signups and stop guests.
 Lifting it clears every freeze but deliberately leaves the switches where the lockdown left them —
@@ -215,8 +218,8 @@ both, and staff can delete anyone's message but never edit one. CI runs it on ev
 
 - **Overwrite-before-unlink is best-effort** on journalled/CoW storage and provider snapshots.
   The real guarantee is that deleted bytes are ciphertext whose keys only ever lived in browsers.
-- **No account recovery.** Lose your device *and* your backup file (and any synced envelope) and
-  your history is gone. That is the design, not a bug.
+- **No account recovery.** Lose your device, your backup file, *and* the password that unlocks your
+  synced envelope — and your history is gone. That is the design, not a bug.
 - **Key sync depends on your password.** The envelope is only as strong as the password you chose.
 - **A weaker password is a weaker door** — regardless of the 250k-round KDF.
 - **Guests are anonymous by definition**: a fresh device is a fresh identity.
