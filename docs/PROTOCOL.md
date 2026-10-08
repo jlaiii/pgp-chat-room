@@ -38,10 +38,11 @@ effect — a rendering hint, never a permission.
 | POST | `/api/rooms/<id>/join` | public → member; private → `{pending: true}` and the room's staff are notified |
 | POST | `/api/rooms/<id>/leave` | leaving a room you own hands it to a room mod, else to nobody |
 | GET | `/api/rooms/<id>/state` | room view + who is online right now |
-| POST | `/api/rooms/<id>/members` | `{username, op}` with op ∈ `approve, deny, kick, mod, unmod` |
+| POST | `/api/rooms/<id>/members` | `{username, op}` with op ∈ `approve, deny, kick, mod, unmod`. A kick by a room owner/room mod reaches plain members only — staff are out of their reach |
 | POST | `/api/rooms/<id>/keys` | register/refresh this browser's public key **in this room** |
 | GET | `/api/rooms/<id>/pool` | every public key in the room + `retentionHours`, `frozen` |
 | GET | `/api/rooms/<id>/history?fp=&limit=` | rows that fingerprint is a recipient of, plus `lockedCount` |
+| POST/DELETE | `/api/rooms/<id>/pin` | POST `{id}` pins that message; ever exactly one per room (a second pin replaces the first), DELETE clears the slot. The owner or staff (`admin`+). Stores `{id, by, t}` only — never content. The view carries `pin`, and `canPin`/`bans` for those who may use them |
 | POST | `/api/rooms/<id>/files` | raw ciphertext body + `X-Content-Kind: image\|video\|file`. 201 `{id,size}`. 403 unless the site switch for that kind **and** the room's `allowFiles` are on; 413 over `maxFileBytes` (refused before the body is read) |
 | GET | `/api/rooms/<id>/files/<fileId>` | the sealed blob back, `application/octet-stream`, `no-store`, for anyone who may read the room. 404 once retention has shredded it |
 | DELETE | `/api/rooms/<id>/messages/<mid>` | shreds that message's ciphertext and leaves a tombstone. The author, or staff moderating; 403 when the site switch is off and you are not staff |
@@ -66,8 +67,8 @@ the lounge by default, or to `?room=<id>` / `{room: "<id>"}`.
 
 | method | path | notes |
 |---|---|---|
-| POST | `/api/mod/ban` | `{target, kind: account\|fp\|ip, room?: null, hours?: 1..720, reason?, mute?}` — `hours` omitted = permanent, `mute: true` = post-block that keeps their session. IP bans are admin-only |
-| POST | `/api/mod/unban` | `{id}` or `{kind, target, room}` |
+| POST | `/api/mod/ban` | `{target, kind: account\|fp\|ip, room?: null, hours?: 1..720, reason?, mute?}` — `hours` omitted = permanent, `mute: true` = post-block that keeps their session. IP bans are admin-only. In a room, the room's owner and room mods may ban plain members; staff act by rank. A room account-ban also removes them from the member list |
+| POST | `/api/mod/unban` | `{id}` or `{kind, target, room}` — staff lift anything; a room's owner/room mods lift only their own room's bans |
 | GET | `/api/mod/bans` | active bans (mod+) |
 | GET | `/api/admin/overview` | accounts, rooms, bans, online, relay stats, per-room counts (rows, keys, attachments, bytes), a 7-day activity series, live sessions (staff; mods get the same read with the session list empty) |
 | PATCH | `/api/admin/settings` | `{allowNewRooms?, guestAccess?, allowRegistration?, lockdown?, motd?, allowImages?, allowVideo?, allowFiles?, allowVoice?, keySyncDefault?, retentionHours?: number\|null, keepForever?}` (admin). Changing the window sweeps the relay immediately |

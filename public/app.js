@@ -609,18 +609,22 @@
     await refreshPool();
     await registerKey();
     await loadHistory();
+    renderPinBar();
     connect();
   }
 
   function setRoomBar() {
     const r = currentRoom();
     if (!r) return;
+    $('roomName').textContent = r.name;
+    $('roomTag').textContent = r.private ? 'private' : r.guestOk ? 'guests welcome' : 'end to end';
     $('frozenBar').hidden = !(r.frozen || state.muted);
     $('frozenBar').textContent = state.muted
       ? 'You are muted in this room — you can read, but not post, until a moderator lifts it.'
       : 'This room is frozen — only moderators can post right now.';
     $('roomSheetBtn').hidden = !(r.canEdit || r.canApprove);
     updateComposerState();
+    renderPinBar();
   }
 
   function updateComposerState() {
@@ -954,6 +958,11 @@
       b.onclick = () => startEdit(wrap, m, dec);
       acts.append(b);
     }
+    const pin = el('button', 'act', 'Pin');
+    pin.type = 'button';
+    pin.dataset.act = 'pin';
+    pin.onclick = () => (state.room && state.room.pin && state.room.pin.id === m.id ? unpinMsg() : pinMsg(m));
+    acts.append(pin);
     const del = el('button', 'act danger', 'Delete');
     del.type = 'button';
     del.dataset.act = 'delete';
@@ -986,8 +995,16 @@
       if (!acts) continue;
       const eb = acts.querySelector('[data-act="edit"]');
       const db = acts.querySelector('[data-act="delete"]');
+      const pb = acts.querySelector('[data-act="pin"]');
       if (eb) eb.hidden = !(own && canEdit);
       if (db) db.hidden = !(own ? (canDel || staff) : staff);
+      if (pb) {
+        // The pin belongs to the room's owner and staff — "Pin" flips to "Unpin"
+        // on whichever message currently holds the one pin slot.
+        const r = currentRoom() || {};
+        pb.hidden = !(r.canPin && !wrap.classList.contains('deleted'));
+        pb.textContent = r.pin && r.pin.id === wrap.dataset.mid ? 'Unpin' : 'Pin';
+      }
       const any = [...acts.children].some(b => !b.hidden);
       acts.hidden = !any;
       if (!any) wrap.classList.remove('acts-on');
@@ -1026,6 +1043,7 @@
         m.edited = Date.now();
         delete body.dataset.editing;
         fillBody(body, nd, `/api/rooms/${m.room || (state.room && state.room.id)}/files`, true);
+        renderPinBar();   // if this message is the pinned one, the snippet just changed
         toast('Message edited');
       } catch (e) {
         save.disabled = false;
@@ -1041,8 +1059,70 @@
       await api(`/api/rooms/${state.room.id}/messages/${m.id}`, { method: 'DELETE' });
       m.deleted = true;
       tombstone(wrap, state.me.handle, m.handle);
+      // The relay drops a pin that pointed at this message; keep the bar honest
+      // in case its room frame is a beat behind.
+      if (state.room && state.room.pin && state.room.pin.id === m.id) { state.room.pin = null; renderPinBar(); }
       toast('Message deleted');
     } catch (e) { toast(e.message, 4200); }
+  }
+
+  /* ---------- one pinned message per room ---------- */
+
+  async function pinMsg(m) {
+    try {
+      const res = await api(`/api/rooms/${state.room.id}/pin`, { method: 'POST', body: { id: m.id } });
+      setCurrentRoom(res.room);
+      renderPinBar(); refreshMsgActions();
+      toast('Pinned to the top of the room');
+    } catch (e) { toast(e.message, 4200); }
+  }
+
+  async function unpinMsg() {
+    try {
+      const res = await api(`/api/rooms/${state.room.id}/pin`, { method: 'DELETE' });
+      setCurrentRoom(res.room);
+      renderPinBar(); refreshMsgActions();
+      toast('Unpinned');
+    } catch (e) { toast(e.message, 4200); }
+  }
+
+  // The bar holds only a message id; the words come from this device's own copy,
+  // so a pin can never surface anything the reader could not already read open.
+  function renderPinBar() {
+    const bar = $('pinBar');
+    const r = currentRoom();
+    const pin = r && r.pin;
+    if (!pin) { bar.hidden = true; bar.innerHTML = ''; return; }
+    const node = [...document.querySelectorAll('#msgs .msg[data-mid]')].find(n => n.dataset.mid === pin.id);
+    bar.innerHTML = '';
+    bar.hidden = false;
+    const text = el('button', 'pin-text');
+    text.type = 'button';
+    if (node) {
+      // A message inside a run has no author line of its own — walk back to the
+      // nearest one so the bar says whose words these are.
+      let who = node.querySelector('.meta .who');
+      for (let prev = node.previousElementSibling; !who && prev; prev = prev.previousElementSibling) {
+        who = prev.querySelector('.meta .who');
+      }
+      const body = node.querySelector('.body');
+      const snippet = (body ? body.textContent.replace(/\s+/g, ' ').trim() : '').slice(0, 120);
+      text.append(el('span', 'pin-who', `${who ? who.textContent : 'message'}: `), el('span', 'pin-snippet', snippet || '…'));
+      text.onclick = () => {
+        node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (node.animate) node.animate([{ backgroundColor: 'rgba(108,140,255,.22)' }, { backgroundColor: 'transparent' }], { duration: 1400 });
+      };
+    } else {
+      text.append(el('span', 'pin-who', 'Pinned message'), el('span', 'pin-snippet', '— not loaded on this device'));
+      text.disabled = true;
+    }
+    bar.append(el('span', 'pin-tag', 'Pinned'), text);
+    if (r.canPin) {
+      const x = el('button', 'btn sm pin-x', 'Unpin');
+      x.type = 'button';
+      x.onclick = unpinMsg;
+      bar.append(x);
+    }
   }
 
   function renderMessage(m, dec, own, tmpId) {
@@ -1195,6 +1275,7 @@
       const dec = await decryptFrom({ ct: m.ct, fp: node.dataset.fp });
       const body = node.querySelector('.body');
       if (body && dec) fillBody(body, dec, `/api/rooms/${state.room && state.room.id}/files`, true);
+      renderPinBar();
       return;
     }
     if (m.t === 'sys') { addSys(m.text, m.ts || Date.now(), m.notice); scrollBottom(); return; }
@@ -1982,6 +2063,27 @@
     $('rsLeaveWrap').hidden = !!r.builtin;
     $('rsDeleteWrap').hidden = !r.canDelete;
     $('rsMembersHint').hidden = !!r.canApprove;
+
+    // Bans in this room: the owner's and room mods' side of moderation — visible,
+    // with a lift button right here. (Staff handle site-wide bans in the panel.)
+    const bansWrap = $('rsBansWrap');
+    bansWrap.hidden = !r.canApprove;
+    if (r.canApprove) {
+      const bans = $('rsBans');
+      bans.innerHTML = '';
+      const list = r.bans || [];
+      if (!list.length) bans.append(el('p', 'hint', 'Nobody is banned from this room right now. Kicking and banning members sits on each member row below.'));
+      for (const b of list) {
+        const row = el('div', 'row');
+        const bits = b.mute ? 'muted here' : 'banned here';
+        const until = b.until ? ` · until ${fmtWhen(b.until)}` : ' · permanent';
+        row.append(el('span', 'row-name', `${b.target} · ${bits}${until}`));
+        const un = el('button', 'btn sm', 'Unban');
+        un.onclick = () => unbanRoom(b.target, b.kind);
+        row.append(un);
+        bans.append(row);
+      }
+    }
   }
 
   async function memberOp(roomId, username, op) {
@@ -1990,6 +2092,17 @@
       await refreshRooms();
       renderRoomSheet();
       toast(`${username}: ${op}`);
+    } catch (e) { toast(e.message, 4200); }
+  }
+
+  // Room-scoped bans: the owner and room mods lift them from the room sheet; staff
+  // bans live in the admin panel. Both settle here.
+  async function unbanRoom(target, kind) {
+    try {
+      const res = await api('/api/mod/unban', { method: 'POST', body: { room: currentRoom().id, target, kind: kind || 'account' } });
+      toast(res.removed ? `${target} is welcome back` : 'Nothing to lift');
+      await refreshRooms();
+      renderRoomSheet();
     } catch (e) { toast(e.message, 4200); }
   }
 
@@ -2020,7 +2133,7 @@
     ['', 'Everything'],
     ['join,leave,evict', 'Presence'],
     ['register,guest,login,login-failed,password-change,sync-key,account-op,flair,fx', 'People'],
-    ['room-create,room-update,room-delete,room-join,room-leave,member-op,room-purge,announce', 'Rooms'],
+    ['room-create,room-update,room-delete,room-join,room-leave,member-op,room-purge,announce,pin', 'Rooms'],
     ['ban,unban', 'Moderation'],
     ['settings,role,admin-claimed,lockdown', 'Admin'],
   ];
@@ -2139,6 +2252,7 @@
     }
     if (t === 'room-create') return { k: 'room', s: `${e.by} created the room “${e.name}”` };
     if (t === 'room-update') return { k: 'room', s: `${e.by} ${e.what} in ${e.room}` };
+    if (t === 'pin') return { k: 'room', s: `${e.by} ${e.on ? 'pinned a message' : 'cleared the pinned message'} in ${e.room}` };
     if (t === 'room-delete') return { k: 'room', s: `${e.by} deleted the room “${e.name || e.room}”` };
     if (t === 'room-purge') return { k: 'room', s: `${e.by} cleared ${e.rows} stored row${e.rows === 1 ? '' : 's'} in ${e.room}` };
     if (t === 'room-join') return { k: 'room', s: `${e.who} ${e.pending ? 'asked to join' : 'joined'} ${e.room}` };

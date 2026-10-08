@@ -108,6 +108,12 @@ Points that were deliberate decisions rather than accidents:
   own role, so a compromised session cannot silently seize the site.
 - **Bans act immediately**: the account's sessions are dropped and matching live sockets receive a
   `kick` frame and close with 1008.
+- **Room-level powers have a ceiling.** A room's owner or room mods can kick and ban plain members
+  of their own room and lift those room bans — never anyone ranked `mod` or above, never the owner
+  (`canModerate()` with the room in hand; the member-op handler mirrors it).
+- **A pin is an id, not content.** The one pinned slot stores `{id, by, t}`; every reader renders it
+  from their own copy. Pinning cannot make the relay read anything, and cannot surface words a
+  reader's key was never a recipient of.
 - **Room deletion shreds** the pool file, every segment, then the directory.
 
 ## Retention and deletion

@@ -13,7 +13,9 @@ seats one on a vacated seat while refusing a wrong code), roles and promotions, 
 malformed/private-key rejection, the pre-join message staying unreadable to a later key, a post-join
 message decrypting and verifying its signature, a non-recipient failing to decrypt, ciphertext-only
 storage (per room), a private room staying invisible with join-requests needing approval, a freeze
-blocking ordinary members but not mods/owners, a ban dropping the live socket and refusing the next
+blocking ordinary members but not mods/owners, a room owner kicking/banning/unbanning inside their own
+room (with staff out of reach of room-level powers), one pinned message per room (owner/staff only, a
+second pin replacing the first, the pin dying with its deleted message), a ban dropping the live socket and refusing the next
 sign-in, the rate limiter, the retention sweep on restart, and the admin surface: the activity log is
 staff-only and never serves the bootstrap code (mods lose admin rows and IPs, the export refuses a
 mod), an announcement lands as a relay notice and never as a stored message, lockdown freezes every

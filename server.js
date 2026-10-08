@@ -35,6 +35,7 @@ const CFG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 const DATA = path.resolve(ROOT, CFG.dataDir || 'data');
 const PUB = path.resolve(ROOT, CFG.publicDir || 'public');
 const EVT_FILE = path.join(DATA, 'events.log');
+const EVT_MAX_BYTES = 5 * 1024 * 1024;   // the log rotates to events.log.1 past this
 const LEGACY_MSG_FILE = path.join(DATA, 'messages.jsonl');
 const PUBLIC_URL = CFG.publicUrl || '';
 const COOKIE = 'pgp_session';
@@ -61,11 +62,26 @@ function roomOnline(roomId) { if (!online.has(roomId)) online.set(roomId, new Ma
 function roomOnlineList(roomId) {
   return [...roomOnline(roomId).entries()].map(([fp, o]) => ({ fp, handle: o.handle, username: o.username || null }));
 }
-function liveFor(roomId) { return { online: roomOnline(roomId).size, keys: chat.poolSize(roomId) }; }
+function liveFor(roomId) { return { online: roomOnline(roomId).size, keys: chat.poolSize(roomId), banned: roomBans(roomId) }; }
+
+// Active bans scoped to one room, as plain rows for the room sheet. Lifting them is
+// the room owner's and staff's business (see /api/mod/unban).
+function roomBans(roomId) {
+  return auth.activeBans()
+    .filter(b => b.room === roomId)
+    .map(b => ({ target: b.target, kind: b.kind, until: b.until || null, mute: !!b.mute, by: b.by || null }));
+}
 
 function event(type, extra) {
   const rec = { t: now(), type, ...extra };
-  try { fs.appendFileSync(EVT_FILE, JSON.stringify(rec) + '\n'); }
+  try {
+    fs.appendFileSync(EVT_FILE, JSON.stringify(rec) + '\n');
+    // Keep the log from growing without bound. (This used to live in the Telegram
+    // notifier; rotation is relay business, so it lives here now.)
+    if (fs.statSync(EVT_FILE).size > EVT_MAX_BYTES) {
+      try { fs.renameSync(EVT_FILE, EVT_FILE + '.1'); } catch { /* try again next event */ }
+    }
+  }
   catch (e) { log('event-write-failed', e.message); }
   pushEvent(rec);
 }
@@ -736,6 +752,12 @@ async function handleRequest(req, res) {
         if (mine && !staff && settings.data.allowMsgDelete === false) return fail(res, 403, 'deleting messages is switched off right now');
         const r = chat.removeMessage(roomId, mid, who);
         if (r.error) return fail(res, 409, r.error);
+        // A deleted message cannot stay pinned: the pin would point at a tombstone.
+        if (room.pin && room.pin.id === mid) {
+          room.pin = null;
+          rooms.saveNow();
+          broadcastRoomState(roomId);
+        }
         event('msg-delete', { room: roomId, id: mid, author: row.handle, by: who });
         broadcastRoom(roomId, { t: 'msg-del', room: roomId, id: mid, by: who, ts: now() });
         return send(res, 200, { ok: true, id: mid });
@@ -769,12 +791,33 @@ async function handleRequest(req, res) {
       return fs.createReadStream(full).pipe(res);
     }
 
-    const roomMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})(?:\/(join|leave|state|keys|pool|history|members|files))?$/);
+    const roomMatch = p.match(/^\/api\/rooms\/([a-z0-9-]{1,32})(?:\/(join|leave|state|keys|pool|history|members|files|pin))?$/);
     if (roomMatch) {
       const roomId = roomMatch[1];
       const sub = roomMatch[2] || '';
       const room = rooms.get(roomId);
       if (!room) return fail(res, 404, 'no such room');
+
+      // One pinned message per room, always. {id, by, t} is all the relay ever
+      // stores — the words come from each reader's own copy of the message.
+      if (sub === 'pin' && (method === 'POST' || method === 'DELETE')) {
+        if (!rooms.can(actor, 'pin', room)) return fail(res, 403, 'not allowed');
+        if (method === 'POST') {
+          const b = await readJson(req);
+          const mid = String((b && b.id) || '').slice(0, 64);
+          const row = mid ? chat.find(roomId, mid) : null;
+          if (!row) return fail(res, 404, 'no such message');
+          if (row.deleted) return fail(res, 409, 'that message was deleted');
+          room.pin = { id: mid, by: actor.username || actor.handle, t: now() };
+          event('pin', { room: roomId, id: mid, on: true, by: actor.username || actor.handle });
+        } else {
+          room.pin = null;
+          event('pin', { room: roomId, id: null, on: false, by: actor.username || actor.handle });
+        }
+        rooms.saveNow();
+        broadcastRoomState(roomId);
+        return send(res, 200, { ok: true, room: rooms.view(room, actor, liveFor(roomId)) });
+      }
 
       if (sub === '' && method === 'GET') {
         if (!rooms.can(actor, 'view', room)) return fail(res, 403, 'not allowed');
@@ -834,7 +877,8 @@ async function handleRequest(req, res) {
       }
       if (sub === 'members' && method === 'POST') {
         const b = await readJson(req);
-        const r = rooms.memberOp(roomId, b.username, b.op, actor);
+        const trec = b.username ? auth.get(String(b.username).toLowerCase()) : null;
+        const r = rooms.memberOp(roomId, b.username, b.op, actor, trec ? trec.role : null);
         if (r.error) return fail(res, 403, r.error);
         event('member-op', { room: roomId, op: b.op, target: r.target, by: actor.username || actor.handle });
         if (b.op === 'kick') {
@@ -1080,8 +1124,9 @@ async function handleRequest(req, res) {
       if (kind === 'ip' && (RANK[actor.role] ?? 0) < RANK.admin) return fail(res, 403, 'only an admin bans by address');
       if (auth.banFor({ username: actor.kind === 'account' ? actor.username : null, fp: actor.fp || null, room: roomId })) return fail(res, 403, 'you are banned');
       // permission + target rank
+      let room = null;
       if (roomId) {
-        const room = rooms.get(roomId);
+        room = rooms.get(roomId);
         if (!room) return fail(res, 404, 'no such room');
         if (!rooms.can(actor, 'ban', room)) return fail(res, 403, 'not allowed');
       } else if ((RANK[actor.role] ?? 0) < RANK.mod) return fail(res, 403, 'not allowed');
@@ -1089,13 +1134,22 @@ async function handleRequest(req, res) {
       if (kind === 'account') {
         const rec = auth.get(target);
         if (!rec) return fail(res, 404, 'no such account');
-        if (!rooms.canModerate(actor, rec.role, rec.username)) return fail(res, 403, 'cannot act on that account');
+        // Room-scoped: the room's owner/mods can act on plain members; staff act by rank.
+        if (!rooms.canModerate(actor, rec.role, rec.username, room)) return fail(res, 403, 'cannot act on that account');
       } else if (!FP_RE.test(target)) return fail(res, 400, 'bad fingerprint');
 
       const hours = b.hours == null ? null : clampInt(b.hours, 1, 720, null);
       const mute = !!b.mute;      // a timeout: they keep reading, they just cannot post
       const r = auth.addBan({ kind, target, room: roomId, until: hours ? now() + hours * 3600e3 : null, reason: b.reason, by: actor.username || actor.handle, mute });
       if (r.error) return fail(res, 400, r.error);
+      // A room ban is also a removal: an account banned from a room should not sit
+      // on its member list (its chips, its mod card) until it is lifted.
+      if (roomId && kind === 'account' && !mute && room) {
+        room.members = room.members.filter(u => u !== target);
+        room.mods = room.mods.filter(u => u !== target);
+        room.pending = room.pending.filter(u => u !== target);
+        rooms.saveNow();
+      }
       event('ban', { kind, target, room: roomId, hours, mute, reason: String(b.reason || '').slice(0, 120), by: actor.username || actor.handle });
       log(mute ? 'mute' : 'ban', kind, target, roomId || 'site-wide', hours ? `${hours}h` : 'permanent');
       let kicked = 0;
@@ -1109,10 +1163,17 @@ async function handleRequest(req, res) {
       return send(res, 200, { ok: true, ban: r.ban, kicked, mute });
     }
     if (method === 'POST' && p === '/api/mod/unban') {
-      if ((RANK[actor.role] ?? 0) < RANK.mod) return fail(res, 403, 'not allowed');
       const b = await readJson(req);
+      const isStaff = (RANK[actor.role] ?? 0) >= RANK.mod;
+      const scopeRoom = b.room ? rooms.get(String(b.room)) : null;
+      if (b.room && !scopeRoom) return fail(res, 404, 'no such room');
+      // Staff lift any ban; a room's own owner/mods lift their room's bans only.
+      if (!isStaff && !(scopeRoom && (rooms.isOwner(scopeRoom, actor) || rooms.isRoomMod(scopeRoom, actor)))) {
+        return fail(res, 403, 'not allowed');
+      }
       const r = auth.liftBan({ id: b.id || null, kind: b.kind, target: b.target, room: b.room === undefined ? undefined : (b.room || null) });
       event('unban', { by: actor.username || actor.handle, ...b, removed: r.removed });
+      if (scopeRoom) broadcastRoomState(scopeRoom.id);
       return send(res, 200, { ok: true, removed: r.removed });
     }
     if (method === 'GET' && p === '/api/mod/bans') {

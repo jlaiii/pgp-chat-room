@@ -352,6 +352,111 @@ test('PGP Room relay — end to end', async t => {
     assert.ok(nowVisible.body.rooms.some(r => r.id === ops), 'after approval the room appears');
   });
 
+  await t.test('a room owner kicks, bans and unbans inside their own room', async () => {
+    const made = await user('POST', '/api/rooms', JSON.stringify({ name: 'Owner Power', about: 'casey runs this one' }));
+    assert.equal(made.status, 201);
+    const rid = made.body.room.id;
+
+    const target = makeClient();
+    await target('POST', '/api/auth/register', JSON.stringify({ username: 'lennon', password: 'lennon-pass-1' }));
+    await target('POST', `/api/rooms/${rid}/join`);
+    const st = await user('GET', `/api/rooms/${rid}/state`);
+    assert.ok(st.body.room.members.includes('lennon'), 'the target is in');
+
+    // kick: off the member list, door still open for a rejoin
+    const kick = await user('POST', `/api/rooms/${rid}/members`, JSON.stringify({ username: 'lennon', op: 'kick' }));
+    assert.equal(kick.status, 200, JSON.stringify(kick.body));
+    assert.ok(!kick.body.room.members.includes('lennon'));
+    assert.equal((await target('POST', `/api/rooms/${rid}/join`)).status, 200);
+
+    // ban: a plain owner bans inside their own room (this used to 403 — canModerate
+    // was staff-only) …
+    const ban = await user('POST', '/api/mod/ban', JSON.stringify({ target: 'lennon', kind: 'account', room: rid, hours: 1, reason: 'testing the door' }));
+    assert.equal(ban.status, 200, JSON.stringify(ban.body));
+    const denied = await target('POST', `/api/rooms/${rid}/join`);
+    assert.equal(denied.status, 401, 'the ban drops the live session outright');
+    const relogin = await target('POST', '/api/auth/login', JSON.stringify({ username: 'lennon', password: 'lennon-pass-1' }));
+    assert.equal(relogin.status, 200, 'a room ban does not lock the account door site-wide');
+    const deniedAgain = await target('POST', `/api/rooms/${rid}/join`);
+    assert.equal(deniedAgain.status, 403, 'but the room door stays shut');
+    assert.equal(deniedAgain.body.banned, true);
+    const view = await user('GET', `/api/rooms/${rid}/state`);
+    assert.ok(view.body.room.bans.some(b => b.target === 'lennon'), 'the room sheet carries the ban list for its owner');
+    assert.ok(!view.body.room.members.includes('lennon'), 'a room ban also takes the account off the member list');
+
+    // … and lifts it again
+    const un = await user('POST', '/api/mod/unban', JSON.stringify({ target: 'lennon', kind: 'account', room: rid }));
+    assert.equal(un.status, 200, JSON.stringify(un.body));
+    assert.equal(un.body.removed, 1);
+    assert.equal((await target('POST', '/api/auth/login', JSON.stringify({ username: 'lennon', password: 'lennon-pass-1' }))).status, 200, 'the door opens again');
+    const back = await target('POST', `/api/rooms/${rid}/join`);
+    assert.equal(back.status, 200);
+    assert.equal(back.body.pending, false);
+  });
+
+  await t.test('room powers have a ceiling: staff are out of reach', async () => {
+    const list = await user('GET', '/api/rooms');
+    const rid = list.body.rooms.find(r => r.name === 'Owner Power').id;
+    await mod('POST', `/api/rooms/${rid}/join`);
+    const kick = await user('POST', `/api/rooms/${rid}/members`, JSON.stringify({ username: 'morgan', op: 'kick' }));
+    assert.equal(kick.status, 403, 'a room owner cannot kick staff');
+    const ban = await user('POST', '/api/mod/ban', JSON.stringify({ target: 'morgan', kind: 'account', room: rid }));
+    assert.equal(ban.status, 403, 'a room owner cannot ban staff');
+  });
+
+  await t.test('one pinned message per room — owner or staff only, replaced, and gone with the message', async () => {
+    const list = await user('GET', '/api/rooms');
+    const rid = list.body.rooms.find(r => r.name === 'Owner Power').id;
+    const K = await makeKey('pinner');
+    await user('POST', `/api/rooms/${rid}/keys`, JSON.stringify({ room: rid, fp: K.fp, keyId: K.keyId, handle: 'casey', publicKey: K.publicKey }));
+    const conn = await connect(user.cookie());
+    conn.ws.send(JSON.stringify({ t: 'hello', room: rid, fp: K.fp, handle: 'casey' }));
+    await waitFor(conn.frames, f => f.t === 'welcome');
+    const seal = async text => openpgp.encrypt({
+      message: await openpgp.createMessage({ text }),
+      encryptionKeys: [await openpgp.readKey({ armoredKey: K.publicKey })],
+      signingKeys: K.priv,
+      format: 'armored',
+    });
+    const send = async (tmpId, text) => {
+      conn.ws.send(JSON.stringify({ t: 'send', room: rid, tmpId, ct: await seal(text), recipients: [K.fp] }));
+      return (await waitFor(conn.frames, f => f.t === 'msg' && f.m.tmpId === tmpId)).m.id;
+    };
+    const m1 = await send('pin-one', 'the rules of the house');
+    const m2 = await send('pin-two', 'an even better rule');
+
+    // a plain member cannot pin …
+    const lennon2 = makeClient();
+    await lennon2('POST', '/api/auth/login', JSON.stringify({ username: 'lennon', password: 'lennon-pass-1' }));
+    assert.equal((await lennon2('POST', `/api/rooms/${rid}/pin`, JSON.stringify({ id: m1 }))).status, 403, 'members do not pin');
+    // … and neither does a global mod: the pin belongs to the owner and the admin/dev ladder.
+    assert.equal((await mod('POST', `/api/rooms/${rid}/pin`, JSON.stringify({ id: m1 }))).status, 403, 'pinning is not a mod power');
+
+    // the owner pins; the room view carries the one slot
+    const p1 = await user('POST', `/api/rooms/${rid}/pin`, JSON.stringify({ id: m1 }));
+    assert.equal(p1.status, 200, JSON.stringify(p1.body));
+    assert.equal(p1.body.room.pin.id, m1);
+    assert.equal(p1.body.room.canPin, true, 'the owner gets the pin control');
+
+    // one slot, ever: an admin pinning another message replaces the first
+    const p2 = await admin('POST', `/api/rooms/${rid}/pin`, JSON.stringify({ id: m2 }));
+    assert.equal(p2.status, 200, JSON.stringify(p2.body));
+    assert.equal(p2.body.room.pin.id, m2, 'a second pin replaces the first — one per room');
+
+    // deleting the pinned message vacates the slot
+    await user('DELETE', `/api/rooms/${rid}/messages/${m2}`);
+    const after = await user('GET', `/api/rooms/${rid}/state`);
+    assert.equal(after.body.room.pin, null, 'the pin dies with its message');
+
+    // and the bar can be cleared by hand
+    const p3 = await user('POST', `/api/rooms/${rid}/pin`, JSON.stringify({ id: m1 }));
+    assert.equal(p3.body.room.pin.id, m1);
+    const cleared = await user('DELETE', `/api/rooms/${rid}/pin`);
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.room.pin, null);
+    conn.ws.close();
+  });
+
   await t.test('a freeze stops ordinary members but not mods, owners or admins', async () => {
     const made = await user('POST', '/api/rooms', JSON.stringify({ name: 'Frozen Test', guestOk: true }));
     const rid = made.body.room.id;

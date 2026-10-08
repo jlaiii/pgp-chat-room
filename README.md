@@ -25,7 +25,10 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
 
 - **Rooms.** A public lounge that everyone lands in, plus any number of rooms users create.
   Each room has **two independent locks**: *freeze* (readable, but only mods and the owner
-  may post) and *private* (hidden from the list, entry needs approval).
+  may post) and *private* (hidden from the list, entry needs approval). A room's **owner**
+  runs their room from its settings sheet: kick, ban and lift bans for their own people,
+  promote room mods, freeze, go private — with a ceiling: room-level powers never reach
+  staff, and staff rank is still what site-wide means.
 - **Identity, three ways.** Sign in with username + password, create an account, or continue
   as a **guest** — a random handle with no account, limited to rooms that welcome guests.
 - **Roles.** `developer` › `admin` › `mod` › `user` › `guest`. Admins run the site and can enter any
@@ -63,6 +66,10 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
   mods, freeze a room, **slow mode** (a per-room floor between one identity's posts), **burn a room's
   stored ciphertext on the spot**, delete a room (its key pool, ciphertext and attachments are
   shredded with it).
+- **One pinned message per room.** The room's owner or staff pin a message to the top — ever
+  exactly one; pinning another replaces it, deleting the pinned message clears it. The pin is
+  only a message id: every reader paints the words from their own decrypted copy, so a pin can
+  never show anyone something they could not already open.
 - **Admin panel.** The hamburger menu's *Manage* section: dashboard, activity, **users**, rooms,
   bans & mutes, settings — one page per job. Freeze an account (lock the door: sessions dropped, sign-in
   refused, data kept) or **panic-lock** it (the emergency stop: freeze plus a wipe of its whole
