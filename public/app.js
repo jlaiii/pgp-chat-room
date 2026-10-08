@@ -458,9 +458,21 @@
   }
 
   const currentRoom = () => state.rooms.find(r => r.id === (state.room && state.room.id)) || state.room;
+  // Keep the list entry and the current-room slot in step. `currentRoom()` reads
+  // the list first, so a live room frame that only touched `state.room` used to
+  // leave every gate judging stale values (the room attachment gate, most of all).
+  function setCurrentRoom(r) {
+    state.room = r || null;
+    if (!r || !state.rooms) return;
+    const i = state.rooms.findIndex(x => x.id === r.id);
+    if (i >= 0) state.rooms[i] = { ...state.rooms[i], ...r };
+  }
 
   async function refreshRooms() {
     try { await loadMe(); } catch { /* keep what we have */ }
+    // The list just came back fresh: pull the current room's copy along too.
+    const fresh = state.rooms.find(x => x.id === (state.room && state.room.id));
+    if (fresh && state.room) state.room = { ...state.room, ...fresh };
     renderRooms();
     renderMe();
     setRoomBar();
@@ -480,7 +492,7 @@
     if (joined.pending) {
       // A private room the room has not let us into yet: show the wait, do not
       // try to read a pool the relay will refuse.
-      state.room = joined.room;
+      setCurrentRoom(joined.room);
       Identity.pref('room', roomId);
       $('msgs').innerHTML = '';
       $('roomName').textContent = joined.room.name;
@@ -494,7 +506,7 @@
       banner(`“${joined.room.name}” is private. Your request is waiting for a moderator.`, 'info');
       return;
     }
-    state.room = joined.room;
+    setCurrentRoom(joined.room);
     Identity.pref('room', roomId);
     state.msgs = [];
     state.lastAuthor = null;
@@ -532,12 +544,21 @@
     input.placeholder = blocked
       ? (state.muted ? 'You are muted in this room' : state.frozen ? 'This room is frozen' : 'You cannot post in this room')
       : 'Message — encrypted on this device';
-    // The attach button only exists where the relay says attachments are welcome —
-    // both the site switch and the room switch have to be on.
-    $('attachBtn').hidden = !state.canPost || !uploadsAllowed();
-    if ($('attachBtn').hidden && pendingFile) setPending(null);
-    // Same two gates for voice, plus the site's own voice switch.
-    $('btnMic').hidden = !state.canPost || !voiceAllowedRoom();
+    // The site switches decide whether the controls exist at all. The room's own
+    // gate no longer hides them — it is enforced when the control is used: an
+    // offer to flip it for the people who can, a plain explanation for everyone
+    // else. A button that silently disappears is a bug report; one that explains
+    // itself is a feature.
+    $('attachBtn').hidden = !state.canPost || !siteUploadsAllowed();
+    // A queued attachment survives only while it is still allowed: a voice note
+    // lives under the voice switch, a file under the upload kinds. Deliberately
+    // NOT keyed on the clip button — a hidden clip button must never clear a
+    // voice note that is mid-queue (voice-only setups hid it and ate the note).
+    const pendingOk = pendingFile && (pendingFile.kind === 'voice'
+      ? voiceSupported() && settingsAllowVoice()
+      : siteUploadsAllowed());
+    if (pendingFile && !pendingOk) setPending(null);
+    $('btnMic').hidden = !state.canPost || !voiceSupported() || !settingsAllowVoice();
   }
 
   async function refreshPool() {
@@ -621,15 +642,36 @@
     if (t.startsWith('video/')) return 'video';
     return 'file';
   };
-  const uploadsAllowed = () => {
+  const siteUploadsAllowed = () => {
     const s = state.settings || {};
-    const r = currentRoom();
-    return !!(r && r.allowFiles && (s.allowImages || s.allowVideo || s.allowFiles));
+    return !!(s.allowImages || s.allowVideo || s.allowFiles);
   };
   const allowedKinds = () => {
     const s = state.settings || {};
     return { image: !!s.allowImages, video: !!s.allowVideo, file: !!s.allowFiles };
   };
+
+  // The room's own attachment gate, enforced when a control is actually used —
+  // never by hiding the control. The people who can flip it are asked right here
+  // (and the picker or mic continues afterwards); everyone else is told exactly
+  // why not. Server-side still refuses the upload if the gate is off.
+  async function roomGateOpen(what) {
+    const r = currentRoom();
+    if (!r) return false;
+    if (r.allowFiles) return true;
+    if (r.canEdit) {
+      const ok = await dialog({
+        title: `${what} are off in this room`,
+        body: `“${r.name}” has its own attachment switch, separate from the site-wide one — and it is off. Turn it on now? Everything is still sealed in this browser before it is uploaded.`,
+        confirm: 'Turn them on',
+      });
+      if (!ok) return false;
+      await patchRoom({ allowFiles: true });
+      return !!(currentRoom() && currentRoom().allowFiles);
+    }
+    toast(`${what} are switched off in this room — a moderator can turn them on in Room settings.`, 4800);
+    return false;
+  }
 
   // One chip painter for both composers: an attachment queued for sending shows
   // its kind, its size (or its length, for a voice note) and a way out.
@@ -656,7 +698,8 @@
     if (state.dm.with) updateDmComposer();
   }
 
-  function pickFile() {
+  async function pickFile() {
+    if (!(await roomGateOpen('Attachments'))) return;
     const kinds = allowedKinds();
     const accept = [];
     if (kinds.image) accept.push('image/*');
@@ -1026,7 +1069,7 @@
       state.muted = !!m.muted;
       state.canPost = !!m.canPost;
       state.online = m.online || [];
-      if (m.room) state.room = m.room;
+      if (m.room) setCurrentRoom(m.room);
       if (m.retentionHours !== undefined) { state.ttlMs = ttlFrom(m.retentionHours); setRetentionNote(); }
       setRoomBar();
       renderPresence();
@@ -1088,7 +1131,7 @@
     if (m.t === 'evt') { onEvent(m.e); return; }
     if (m.t === 'key:add') { await addPoolKey(m.key); toast(`${m.key.handle} can now read new messages`); return; }
     if (m.t === 'room') {
-      state.room = m.room;
+      setCurrentRoom(m.room);
       state.frozen = !!m.frozen;
       state.muted = !!m.muted;
       state.canPost = !!m.canPost;
@@ -1176,7 +1219,6 @@
   const voice = { rec: null, stream: null, chunks: [], mime: '', timer: null, startedAt: 0, cancel: false, target: null, stopRequested: false };
   const voiceSupported = () => !!(window.MediaRecorder && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
   const settingsAllowVoice = () => !!((state.settings || {}).allowVoice);
-  const voiceAllowedRoom = () => voiceSupported() && settingsAllowVoice() && !!(currentRoom() && currentRoom().allowFiles);
   const voiceAllowedDm = () => voiceSupported() && settingsAllowVoice();
 
   async function startVoice(target) {
@@ -1184,7 +1226,7 @@
     if (!voiceSupported()) { toast('This browser cannot record audio', 3600); return; }
     if (!settingsAllowVoice()) { toast('Voice messages are switched off right now', 4200); return; }
     if (target === 'dm' && (!state.dm.with || (state.dm.meta && state.dm.meta.blocked))) { toast('Voice messages are not available here', 3600); return; }
-    if (target === 'room' && !voiceAllowedRoom()) { toast('Voice messages are not available here', 3600); return; }
+    if (target === 'room' && !(await roomGateOpen('Voice messages'))) return;
     try { voice.stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
     catch { toast('Microphone permission was refused', 3600); return; }
     const prefer = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
@@ -1859,7 +1901,7 @@
     const r = currentRoom();
     try {
       const res = await api(`/api/rooms/${r.id}`, { method: 'PATCH', body: patch });
-      state.room = res.room;
+      setCurrentRoom(res.room);
       await refreshRooms();
       renderRoomSheet();
       toast('Room updated');
