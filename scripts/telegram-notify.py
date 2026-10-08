@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """PGP Room — optional notifier for the Telegram Bot API.
 
-Reads new lines from the relay's events log (handles, joins, moderation actions and the
-one-time admin bootstrap code — never message content, since the relay cannot decrypt) and
-sends at most two messages per run: the bootstrap code on its own, then one summary of
-everything else. Intended to run from a systemd timer every ~30s; silent on quiet runs.
+Reads new lines from the relay's events log (moderation actions and the one-time admin bootstrap
+code — never message content, since the relay cannot decrypt) and sends at most two messages per
+run: the bootstrap code on its own, then one summary of everything else. Joins and leaves are
+deliberately not sent: the relay's admin log carries them, filterable and on demand. Intended to
+run from a systemd timer every ~30s; silent on quiet runs.
 
 Configuration (environment):
   PGPCHAT_TG_CHATS       comma-separated chat ids to notify           (required)
@@ -152,7 +153,7 @@ def main() -> int:
         return 1
 
     if "--test" in sys.argv:
-        text = "PGP Room — notifier online. You'll get a message here for joins, moderation actions, and any new bootstrap code."
+        text = "PGP Room — notifier online. You'll get a message here for moderation actions and any new bootstrap code; joins and leaves live in the relay's admin log."
         if ROOM_URL:
             text += f"\n{ROOM_URL}"
         for cid in CHATS:

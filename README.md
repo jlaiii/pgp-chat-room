@@ -1,5 +1,7 @@
 # PGP Room
 
+[![test](https://github.com/jlaiii/pgp-chat-room/actions/workflows/test.yml/badge.svg)](https://github.com/jlaiii/pgp-chat-room/actions/workflows/test.yml)
+
 Self-hosted, end-to-end encrypted group chat with real rooms, accounts and moderation.
 Every message is encrypted **and signed in the browser** before it is sent, so the server
 stores ciphertext it cannot read — and holds no key that could ever open it.
@@ -117,6 +119,7 @@ the relay necessarily knows some *metadata* — and it is better to say so plain
 | attachment blobs: how many bytes, in which room, uploaded when, by whom | what any file *is* — no name, no type, no content |
 | direct messages: who ↔ who a thread is between, row times, sealed blob sizes | what any DM says — sealed to the two participants' keys; **DMs are not in the audit trail at all** |
 | friend requests, friendships and blocks: which accounts list which | who declined whom, and the reasons people talk |
+| the pinned message of a room: its id, who pinned it, when | what it says — every reader paints the words from its own copy |
 | the audit trail: joins, leaves, key registrations, moderation actions, sign-in attempts (with the IP on auth events) | |
 | the site notice text and which accounts wear which name effect | |
 | message metadata: id, seq, time, room, author handle/fingerprint, recipient fingerprints, ciphertext | who is *reading* what, beyond presence in a room |
@@ -152,9 +155,12 @@ seat is only *claimed* (one-shot code) or *granted* (admin panel), never assumed
 
 The claim code is the fallback for a relay that has accounts but no admin (a vacated seat). While no
 admin exists, boot generates a one-time 8-character code into `data/settings.json` and emits an
-`admin-claim` event; `scripts/telegram-notify.py` (or your own reader of `data/events.log`) delivers
-it to the operator, who enters it in the app under *menu → Claim admin*. It burns on
-use, and an empty relay clears it at the first signup because the seat is already taken.
+`admin-claim` event. The relay itself never phones anywhere — if you want the code (and a one-line
+summary of other moderation events) delivered, the **optional** `scripts/telegram-notify.py` does it
+over the Telegram Bot API: give it a bot token and chat ids, run it from a timer, or just read
+`data/events.log` yourself. Either way the operator enters the code in the app under *menu → Claim
+admin*. It burns on use, and an empty relay clears it at the first signup because the seat is
+already taken.
 
 ### The admin area
 
@@ -263,7 +269,9 @@ The suite asserts the properties this project actually promises: a key that join
 read earlier ciphertext, post-join messages decrypt *and verify*, non-recipients fail, only
 ciphertext reaches disk, the rate limiter engages, the retention sweep empties segments, a
 private room stays invisible to non-members, a freeze blocks ordinary members but not mods or
-owners, a ban drops the live socket, the first account on an empty relay seats the admin while the
+owners, a room's owner kicks, bans and lifts bans inside their own room with staff rank out of
+reach, one pinned message per room (a second pin replaces the first, and the pin dies with its
+deleted message), a ban drops the live socket, the first account on an empty relay seats the admin while the
 claim code stays the fallback for a vacated seat, the admin log is staff-only and never serves the
 claim code, lockdown closes the doors, slow mode throttles one identity but not staff, announcements
 are never stored as messages, account deletion hands over the rooms, an admin can burn a room's
