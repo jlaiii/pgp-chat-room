@@ -20,7 +20,7 @@ browser A ──encrypt+sign──▶ relay (ciphertext only) ──▶ browser 
 <p align="center">
   <img src="docs/img/signin-mobile.png" width="240" alt="Sign in, create an account, or continue as a guest">
   <img src="docs/img/room-controls-mobile.png" width="240" alt="Room controls: freeze, privacy, guest access, files">
-  <img src="docs/img/admin-mobile.png" width="240" alt="Moderation and admin: site settings, accounts, rooms, bans">
+  <img src="docs/img/admin-mobile.png" width="240" alt="The hamburger rail: rooms, people, and the Manage menu — dashboard, users, activity, bans, rooms, settings">
 </p>
 
 ## What it does
